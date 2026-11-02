@@ -1,0 +1,27 @@
+#include <windows.h>
+#include "../src/resource.h"
+IDI_APP ICON "app.ico"
+IDI_APP_A ICON "app_a.ico"
+IDI_APP_C ICON "app_c.ico"
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,13,4,0
+ PRODUCTVERSION 1,13,4,0
+ FILEOS 0x40004
+ FILETYPE 0x2
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041204b0"
+    BEGIN
+      VALUE "CompanyName", "주식회사신설"
+      VALUE "FileDescription", "차곡 탐색기 메뉴"
+      VALUE "FileVersion", "1.13.4"
+      VALUE "ProductName", "차곡"
+      VALUE "ProductVersion", "1.13.4"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x412, 1200
+  END
+END
