@@ -27,17 +27,23 @@ using namespace Gdiplus;
 
 // ============================================================ 설정/테마
 #include "themes.h"
-// 테마 = 화면 배치(아래 TH_BASIC~TH_MINT 6가지) + 색상표. 배치 비교는 반드시 g_ly 로 한다(g_theme 아님)
+// 테마 = 화면 배치 + 색상표. 배치는 TH_BASIC~TH_MINT 6가지와 고유 배치 TH_CHAGOK~TH_BYEOL 5가지.
+// 배치 비교는 반드시 g_ly 로 한다(g_theme 아님)
 enum { TH_BASIC, TH_MIDNIGHT, TH_PASTEL, TH_NORDIC, TH_NAVY, TH_MINT,
-       TH_FOREST, TH_CORAL, TH_GRAPHITE, TH_OCEAN, TH_BURGUNDY, TH_SAND, TH_COUNT };
+       TH_FOREST, TH_CORAL, TH_GRAPHITE, TH_OCEAN, TH_BURGUNDY, TH_SAND,
+       TH_CHAGOK, TH_SHIM, TH_BOM, TH_MUL, TH_BYEOL, TH_COUNT };
 static const wchar_t* TH_NAMES[TH_COUNT] = {L"기본", L"미드나잇", L"파스텔", L"노르딕", L"네이비골드", L"민트",
-                                            L"포레스트", L"선셋 코랄", L"그라파이트", L"오션", L"버건디", L"샌드"};
+                                            L"포레스트", L"선셋 코랄", L"그라파이트", L"오션", L"버건디", L"샌드",
+                                            L"차곡", L"쉼", L"봄빛", L"물결", L"별밤"};
 static const int TH_LAYOUT[TH_COUNT] = {TH_BASIC, TH_MIDNIGHT, TH_PASTEL, TH_NORDIC, TH_NAVY, TH_MINT,
-                                        TH_NORDIC, TH_BASIC, TH_MIDNIGHT, TH_PASTEL, TH_NAVY, TH_MINT};
+                                        TH_NORDIC, TH_BASIC, TH_MIDNIGHT, TH_PASTEL, TH_NAVY, TH_MINT,
+                                        TH_CHAGOK, TH_SHIM, TH_BOM, TH_MUL, TH_BYEOL};
 static const Palette* PALS[TH_COUNT][2] = {{&PAL_BASIC_L, &PAL_BASIC_D}, {&PAL_MID_L, &PAL_MID_D}, {&PAL_PAS_L, &PAL_PAS_D},
                                            {&PAL_NOR_L, &PAL_NOR_D}, {&PAL_NAVY_L, &PAL_NAVY_D}, {&PAL_MINT_L, &PAL_MINT_D},
                                            {&PAL_FOR_L, &PAL_FOR_D}, {&PAL_COR_L, &PAL_COR_D}, {&PAL_GRA_L, &PAL_GRA_D},
-                                           {&PAL_OCE_L, &PAL_OCE_D}, {&PAL_BUR_L, &PAL_BUR_D}, {&PAL_SAND_L, &PAL_SAND_D}};
+                                           {&PAL_OCE_L, &PAL_OCE_D}, {&PAL_BUR_L, &PAL_BUR_D}, {&PAL_SAND_L, &PAL_SAND_D},
+                                           {&PAL_CHA_L, &PAL_CHA_D}, {&PAL_SHIM_L, &PAL_SHIM_D}, {&PAL_BOM_L, &PAL_BOM_D},
+                                           {&PAL_MUL_L, &PAL_MUL_D}, {&PAL_BYEOL_L, &PAL_BYEOL_D}};
 enum { MODE_SYSTEM = 0, MODE_LIGHT = 1, MODE_DARK = 2 };
 static const COLORREF NONE = 0xFFFFFFFF;
 
@@ -117,9 +123,10 @@ static void MakeFonts() {
 
 static void ApplyTitleBar(HWND h) {
     BOOL dark = g_dark;
-    if (g_ly == TH_BASIC) dark = TRUE;  // 파란 띠와 이어지도록 흰 글자
+    bool band = g_ly == TH_BASIC || g_ly == TH_BOM;  // 위쪽 색 띠와 이어지는 제목 표시줄
+    if (band) dark = TRUE;
     if (FAILED(DwmSetWindowAttribute(h, 20, &dark, sizeof(dark)))) DwmSetWindowAttribute(h, 19, &dark, sizeof(dark));
-    COLORREF cap = P.caption, txt = g_ly == TH_BASIC ? P.onBand : P.text;
+    COLORREF cap = P.caption, txt = band ? P.onBand : P.text;
     DwmSetWindowAttribute(h, 35, &cap, sizeof(cap));  // Windows 11: 캡션 색
     DwmSetWindowAttribute(h, 36, &txt, sizeof(txt));
     DwmSetWindowAttribute(h, 34, &cap, sizeof(cap));  // 테두리 색
@@ -169,6 +176,14 @@ static void FillR(Graphics& g, RECT r, float rad, COLORREF c) {
     RoundPath(p, RF(r), rad);
     g.FillPath(&b, &p);
 }
+// 반투명 채우기 (alpha 0~255)
+static void FillRA(Graphics& g, RECT r, float rad, COLORREF c, BYTE alpha) {
+    if (c == NONE || r.right <= r.left || r.bottom <= r.top) return;
+    SolidBrush b(GC(c, alpha));
+    GraphicsPath p;
+    RoundPath(p, RF(r), rad);
+    g.FillPath(&b, &p);
+}
 // 그라데이션 채우기 (c2 가 NONE 이면 단색). angle: 0 가로, 90 세로, 135 대각
 static void FillG(Graphics& g, RECT r, float rad, COLORREF c1, COLORREF c2, float angle = 0) {
     if (c2 == NONE) { FillR(g, r, rad, c1); return; }
@@ -176,6 +191,19 @@ static void FillG(Graphics& g, RECT r, float rad, COLORREF c1, COLORREF c2, floa
     RectF rf = RF(r);
     RectF big(rf.X - 1, rf.Y - 1, rf.Width + 2, rf.Height + 2);
     LinearGradientBrush b(big, GC(c1), GC(c2), angle, FALSE);
+    GraphicsPath p;
+    RoundPath(p, rf, rad);
+    g.FillPath(&b, &p);
+}
+// 세 가지 색 그라데이션 (봄빛 머리 띠)
+static void FillG3(Graphics& g, RECT r, float rad, COLORREF c1, COLORREF c2, COLORREF c3, float angle = 0) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
+    RectF rf = RF(r);
+    RectF big(rf.X - 1, rf.Y - 1, rf.Width + 2, rf.Height + 2);
+    LinearGradientBrush b(big, GC(c1), GC(c3), angle, FALSE);
+    Color cs[3] = {GC(c1), GC(c2), GC(c3)};
+    REAL pos[3] = {0.0f, 0.55f, 1.0f};
+    b.SetInterpolationColors(cs, pos, 3);
     GraphicsPath p;
     RoundPath(p, rf, rad);
     g.FillPath(&b, &p);
@@ -613,7 +641,7 @@ static std::wstring SplitLabel(uint64_t mb) {
 static std::wstring FsLabel(const std::wstring& p);
 static std::wstring DirTitle() {
     if (g_fs) return FsLabel(g_fsPath);
-    if (!g_hasArc) return APP_NAME;
+    if (!g_hasArc) return L"열린 압축 파일 없음";
     return g_cur == 0 ? FileNameOf(g_arc.path) : g_dirs[(size_t)g_cur].name;
 }
 static std::wstring ArcSummary() {  // "제안서.zip · 항목 33개 · 31.6 MB → 24.8 MB"
@@ -826,7 +854,8 @@ static const wchar_t* JobName() {
 
 // ============================================================ 레이아웃
 enum BtnStyle { BS_LABEL, BS_PRIMARY, BS_SIDE, BS_OUTLINE, BS_ICONBTN, BS_ACCENT, BS_CRUMB, BS_SEP, BS_RIBBON, BS_TAB,
-                BS_VIEWTOG, BS_RAIL, BS_GRID, BS_PILL, BS_TOOL, BS_OUTLINE2, BS_PROGPILL, BS_RECENT };
+                BS_VIEWTOG, BS_RAIL, BS_GRID, BS_PILL, BS_TOOL, BS_OUTLINE2, BS_PROGPILL, BS_RECENT,
+                BS_LAYER, BS_DOCK, BS_DOCKACC, BS_HERO, BS_HEROW, BS_HEROICON, BS_ORB, BS_ORBSM };
 enum CmdId { ID_NONE, ID_COMPRESS = 100, ID_SPLIT, ID_EXTRACT_ALL, ID_ADD, ID_EXTRACT_SEL, ID_THEME, ID_BACK,
              ID_CANCEL, ID_OPEN, ID_SETTINGS, ID_VIEW_TILES, ID_VIEW_LIST, ID_OPENFILE, ID_SHOWPROG, ID_SEARCHCLR, ID_BROWSE, ID_FSCRUMB = 600, ID_RECENT = 900, ID_CRUMB = 1000 };
 struct Btn {
@@ -845,7 +874,7 @@ struct Layout {
     std::vector<TreeRow> trows;
     std::vector<Group> groups;
     RECT side{}, top{}, ribbon{}, crumb{}, header{}, list{}, status{}, card{}, zone{}, info{}, tree{}, panel{}, mid{};
-    RECT title{}, sub{}, chips{}, logo{}, search{};
+    RECT title{}, sub{}, chips{}, logo{}, search{}, dock{};
     RECT sbTrack{}, sbThumb{};
     int rowH = 24, padTop = 0, inset = 0, treeRowH = 28, emptyY = 0;
     bool hasSb = false, tiles = false;
@@ -1085,8 +1114,6 @@ static void LayoutMidnight(int W, int H, bool busy) {
     L.rowH = S(40); L.padTop = S(4); L.inset = S(10); L.rowRad = SF(6);
     L.side = {0, 0, S(232), H};
     int y = S(14);
-    L.logo = {S(18), y, S(220), y + S(30)};
-    y += S(44);
     AddB(ID_COMPRESS, {S(14), y, S(218), y + S(46)}, L"새로 압축", IC_ARCHIVE, BS_PRIMARY, !busy); y += S(54);
     AddB(ID_SPLIT, {S(14), y, S(218), y + S(46)}, L"분할 압축", IC_SPLIT, BS_SIDE, !busy); y += S(54);
     AddB(ID_EXTRACT_ALL, {S(14), y, S(218), y + S(46)}, L"압축 해제", IC_EXTRACT, BS_SIDE, !busy); y += S(54);
@@ -1106,6 +1133,7 @@ static void LayoutMidnight(int W, int H, bool busy) {
     AddB(ID_ADD, {x - w, cy, x, cy + ch}, L"파일 추가", IC_PLUS, BS_OUTLINE, g_hasArc && !busy && !g_arc.readOnly); x -= w + S(8);
     if (HasList()) { int sw = min(S(200), max(S(120), (int)(x - p.left) / 3)); L.search = {x - sw, cy, x, cy + ch}; x -= sw + S(8); }
     AddCrumbs(p.left + S(52), x - S(8), cy, cy + ch, false);
+    if (!HasList()) L.title = {p.left + S(52), cy, x - S(8), cy + ch};  // 아무것도 안 열었을 때 제목
     L.zone = {p.left + S(18), p.bottom - S(16) - S(54), p.right - S(18), p.bottom - S(16)};
     if (HasList()) {
         L.header = {p.left, L.top.bottom + 1, p.right, L.top.bottom + 1 + S(34)};
@@ -1118,8 +1146,7 @@ static void LayoutPastel(int W, int H, bool busy) {
     L.side = {pad, pad, pad + S(92), H - pad};
     RECT& r = L.side;
     int cx = (r.left + r.right) / 2;
-    L.logo = {cx - S(24), r.top + S(22), cx + S(24), r.top + S(70)};
-    int bw = S(66), bh = S(64), y = r.top + S(94);
+    int bw = S(66), bh = S(64), y = r.top + S(22);
     struct { int id; const wchar_t* t; int ic; } rb[] = {{ID_COMPRESS, L"압축", IC_ARCHIVE}, {ID_SPLIT, L"분할", IC_SPLIT}, {ID_EXTRACT_ALL, L"풀기", IC_EXTRACT}, {ID_BROWSE, L"내 PC", IC_DRIVE}};
     int gapR = S(10), avail = (r.bottom - S(26) - 2 * bh) - S(10) - y;  // 아래 설정 버튼 위까지
     int rbh = max(S(48), min(bh, (avail - 3 * gapR) / 4));
@@ -1153,8 +1180,7 @@ static void LayoutTreeSide(int W, int H, bool busy) {
     L.side = {0, 0, sw, H};
     int y;
     if (!navy) {
-        L.logo = {S(22), S(20), sw - S(20), S(52)};
-        y = S(68);
+        y = S(20);
         int gw = (sw - S(28) - S(18)) / 4;
         struct { int id; const wchar_t* t; int ic; } gb[] = {{ID_COMPRESS, L"압축", IC_ARCHIVE}, {ID_SPLIT, L"분할", IC_SPLIT}, {ID_EXTRACT_ALL, L"풀기", IC_EXTRACT}, {ID_BROWSE, L"내 PC", IC_DRIVE}};
         for (int i = 0; i < 4; i++) {
@@ -1163,8 +1189,7 @@ static void LayoutTreeSide(int W, int H, bool busy) {
         }
         y += S(60) + S(22);
     } else {
-        L.logo = {S(22), S(16), sw - S(20), S(46)};
-        y = S(82);
+        y = S(20);
         AddB(ID_COMPRESS, {S(14), y, sw - S(14), y + S(42)}, L"새로 압축", IC_ARCHIVE, BS_PRIMARY, !busy); y += S(46);
         AddB(ID_SPLIT, {S(14), y, sw - S(14), y + S(42)}, L"분할 압축", IC_SPLIT, BS_SIDE, !busy); y += S(46);
         AddB(ID_EXTRACT_ALL, {S(14), y, sw - S(14), y + S(42)}, L"압축 해제", IC_EXTRACT, BS_SIDE, !busy); y += S(46);
@@ -1196,8 +1221,7 @@ static void LayoutTreeSide(int W, int H, bool busy) {
 
 static void LayoutMint(int W, int H, bool busy) {
     L.top = {0, 0, W, S(58)};
-    L.logo = {S(20), 0, S(80), S(58)};
-    int by = S(11), bh = S(36), x = S(84);
+    int by = S(11), bh = S(36), x = S(16);
     int w = BtnW(L"새로 압축", g_fontBold, true) + S(8);
     AddB(ID_COMPRESS, {x, by, x + w, by + bh}, L"새로 압축", IC_ARCHIVE, BS_PILL, !busy); x += w + S(8);
     w = BtnW(L"분할 압축", g_font, true);
@@ -1233,6 +1257,178 @@ static void LayoutMint(int W, int H, bool busy) {
     int iy = L.info.top + S(150) + (int)iv.rows.size() * S(30) + S(16);
     if (iv.b1) { AddB(iv.b1, {ix, iy, ir, iy + S(40)}, iv.t1, iv.ic1, BS_ACCENT, !busy && HasList()); iy += S(48); }
     if (iv.b2) AddB(iv.b2, {ix, iy, ir, iy + S(40)}, iv.t2, IC_NONE, BS_OUTLINE2, (!busy || g_fs) && HasList());
+}
+
+// ---------------------------------------------------------------- 고유 배치 5종 (1.14)
+// 공통: 뒤로 + 제목 + 요약, 오른쪽에 찾기/파일 추가/선택 추출. 목록은 L.header / L.list
+static void TitleRow(int left, int right, int y, int h, bool withSearch, int searchW, bool pills) {
+    int x = right;
+    (void)pills;
+    if (withSearch && HasList()) { L.search = {x - searchW, y, x, y + h}; x -= searchW + S(10); }
+    int tx = left;
+    if (CanBack()) { AddB(ID_BACK, {tx - S(6), y + (h - S(32)) / 2, tx + S(26), y + (h + S(32)) / 2}, L"", IC_BACK, BS_ICONBTN, true); tx += S(32); }
+    L.title = {tx, y - S(2), x, y + h + S(2)};
+}
+// 1) 차곡: 이불을 차곡차곡 쌓은 것처럼 층층이 놓인 버튼, 줄마다 색 띠, 쌓인 색 막대로 압축률
+static void LayoutChagok(int W, int H, bool busy) {
+    int sw = S(236);
+    L.side = {0, 0, sw, H};
+    int y = S(20);
+    struct { int id; const wchar_t* t; int ic; } ly[] = {{ID_COMPRESS, L"새로 압축", IC_ARCHIVE}, {ID_SPLIT, L"분할 압축", IC_SPLIT},
+                                                         {ID_EXTRACT_ALL, L"압축 해제", IC_EXTRACT}, {ID_BROWSE, L"내 PC", IC_DRIVE}};
+    for (int i = 0; i < 4; i++) {
+        int off = i * S(6);
+        AddB(ly[i].id, {S(16) + off, y, sw - S(16), y + S(44)}, ly[i].t, ly[i].ic, BS_LAYER, ly[i].id == ID_BROWSE || !busy, ly[i].id == ID_BROWSE && g_fs);
+        y += S(50);
+    }
+    y += S(14);
+    L.groups.push_back({{S(20), y, sw - S(10), y + S(20)}, g_fs ? L"내 PC" : L"이 압축 파일"});
+    L.tree = {S(10), y + S(24), sw - S(10), H - S(12)};
+    L.treeRowH = S(30);
+    int mx = sw + S(26), mr = W - S(26), by = S(18), bh = S(34), x = mr;
+    AddB(ID_THEME, {x - bh, by, x, by + bh}, L"", IC_THEME, BS_OUTLINE, true); x -= bh + S(8);
+    AddB(ID_SETTINGS, {x - bh, by, x, by + bh}, L"", IC_GEAR, BS_OUTLINE, true); x -= bh + S(10);
+    int w = BtnW(L"선택 추출", g_fontBold, true);
+    AddB(ID_EXTRACT_SEL, {x - w, by, x, by + bh}, L"선택 추출", IC_DOWNLOAD, BS_ACCENT, g_hasArc && !busy && HasRealSel()); x -= w + S(8);
+    w = BtnW(L"파일 추가", g_font, true);
+    AddB(ID_ADD, {x - w, by, x, by + bh}, L"파일 추가", IC_PLUS, BS_OUTLINE, g_hasArc && !busy && !g_arc.readOnly); x -= w + S(8);
+    TitleRow(mx, x, by, bh, true, min(S(220), max(S(130), (x - mx) / 3)), false);
+    L.sub = {L.title.left, by + bh + S(4), mr, by + bh + S(22)};
+    L.card = {mx, S(84), mr, H - S(48)};
+    L.status = {mx, H - S(36), mr, H - S(12)};
+    L.inset = S(10); L.rowH = S(45); L.rowRad = SF(9); L.padTop = S(2);
+    if (HasList()) {
+        L.header = {L.card.left + S(10), L.card.top + S(6), L.card.right - S(10), L.card.top + S(38)};
+        L.list = {L.card.left, L.header.bottom + S(2), L.card.right, L.card.bottom - S(6)};
+    } else L.list = {L.card.left, L.card.top, L.card.right, L.card.bottom};
+}
+// 2) 쉼: 넉넉한 여백의 둥근 카드 하나, 자주 쓰는 버튼은 아래 떠 있는 작업 줄
+static void LayoutShim(int W, int H, bool busy) {
+    L.side = {S(18), S(18), S(18) + S(84), H - S(18)};
+    int cx = (L.side.left + L.side.right) / 2, bw = S(66), bh = S(60);
+    AddB(ID_BROWSE, {cx - bw / 2, L.side.top + S(18), cx + bw / 2, L.side.top + S(18) + bh}, L"내 PC", IC_DRIVE, BS_RAIL, true, g_fs);
+    AddB(ID_THEME, {cx - bw / 2, L.side.bottom - S(16) - bh, cx + bw / 2, L.side.bottom - S(16)}, L"테마", IC_THEME, BS_RAIL, true);
+    AddB(ID_SETTINGS, {cx - bw / 2, L.side.bottom - S(24) - 2 * bh, cx + bw / 2, L.side.bottom - S(24) - bh}, L"설정", IC_GEAR, BS_RAIL, true);
+    L.panel = {L.side.right + S(18), S(18), W - S(18), H - S(18)};
+    RECT& p = L.panel;
+    int pad = S(34);
+    TitleRow(p.left + pad, p.right - pad, p.top + S(26), S(40), true, min(S(260), max(S(150), (int)(p.right - p.left) / 3)), true);
+    L.sub = {L.title.left, p.top + S(68), L.search.left > 0 ? L.search.left - S(10) : p.right - pad, p.top + S(88)};
+    // 아래 작업 줄
+    struct { int id; const wchar_t* t; int ic; bool en; } dk[] = {
+        {ID_COMPRESS, L"새로 압축", IC_ARCHIVE, !busy}, {ID_SPLIT, L"분할", IC_SPLIT, !busy}, {ID_EXTRACT_ALL, L"압축 해제", IC_EXTRACT, !busy},
+        {ID_ADD, L"파일 추가", IC_PLUS, g_hasArc && !busy && !g_arc.readOnly}, {ID_EXTRACT_SEL, L"선택 추출", IC_DOWNLOAD, g_hasArc && !busy && HasRealSel()}};
+    int ws[5], total = 0;
+    for (int i = 0; i < 5; i++) { ws[i] = BtnW(dk[i].t, g_fontBold, true) + S(4); total += ws[i]; }
+    total += 4 * S(4);
+    int dh = S(40), dy = p.bottom - S(30) - dh, dx = (p.left + p.right) / 2 - total / 2;
+    L.dock = {dx - S(7), dy - S(7), dx + total + S(7), dy + dh + S(7)};
+    for (int i = 0; i < 5; i++) { AddB(dk[i].id, {dx, dy, dx + ws[i], dy + dh}, dk[i].t, dk[i].ic, i == 0 ? BS_DOCKACC : BS_DOCK, dk[i].en); dx += ws[i] + S(4); }
+    L.status = {L.dock.right + S(12), L.dock.top, p.right - pad, L.dock.bottom};
+    L.inset = 0; L.rowH = S(50); L.rowRad = SF(16); L.padTop = 0;
+    int lx = p.left + S(20), lr = p.right - S(20);
+    if (HasList()) {
+        L.header = {lx, p.top + S(100), lr, p.top + S(130)};
+        L.list = {lx, L.header.bottom, lr, L.dock.top - S(10)};
+    } else L.list = {lx, p.top + S(100), lr, L.dock.top - S(10)};
+}
+// 3) 봄빛: 밝은 그라데이션 머리 띠 위에 버튼, 목록 카드가 띠에 걸쳐 올라옴, 형식별 색 배지
+static void LayoutBom(int W, int H, bool busy) {
+    L.top = {0, 0, W, S(178)};
+    int x = S(26), by = S(18), bh = S(34);
+    struct { int id; const wchar_t* t; int ic; } pb[] = {{ID_COMPRESS, L"새로 압축", IC_ARCHIVE}, {ID_SPLIT, L"분할 압축", IC_SPLIT},
+                                                         {ID_EXTRACT_ALL, L"압축 해제", IC_EXTRACT}, {ID_BROWSE, L"내 PC", IC_DRIVE}};
+    for (int i = 0; i < 4; i++) {
+        int w = BtnW(pb[i].t, g_fontBold, true) + S(4);
+        AddB(pb[i].id, {x, by, x + w, by + bh}, pb[i].t, pb[i].ic, i == 0 ? BS_HEROW : BS_HERO, pb[i].id == ID_BROWSE || !busy, pb[i].id == ID_BROWSE && g_fs);
+        x += w + S(8);
+    }
+    int rx = W - S(26);
+    AddB(ID_THEME, {rx - bh, by, rx, by + bh}, L"", IC_THEME, BS_HEROW, true); rx -= bh + S(8);
+    AddB(ID_SETTINGS, {rx - bh, by, rx, by + bh}, L"", IC_GEAR, BS_HEROW, true);
+    int tx = S(26), ty = S(72);
+    if (CanBack()) { AddB(ID_BACK, {tx - S(6), ty, tx + S(28), ty + S(34)}, L"", IC_BACK, BS_HEROICON, true); tx += S(34); }
+    L.title = {tx, ty - S(2), W - S(26), ty + S(36)};
+    L.card = {S(22), S(150), W - S(22), H - S(18)};
+    RECT& c = L.card;
+    int ty2 = c.top + S(14), th = S(34), cxr = c.right - S(20);
+    int w = BtnW(L"선택 추출", g_fontBold, true);
+    AddB(ID_EXTRACT_SEL, {cxr - w, ty2, cxr, ty2 + th}, L"선택 추출", IC_DOWNLOAD, BS_ACCENT, g_hasArc && !busy && HasRealSel()); cxr -= w + S(8);
+    w = BtnW(L"파일 추가", g_font, true);
+    AddB(ID_ADD, {cxr - w, ty2, cxr, ty2 + th}, L"파일 추가", IC_PLUS, BS_OUTLINE, g_hasArc && !busy && !g_arc.readOnly); cxr -= w + S(8);
+    if (HasList()) { int sw = min(S(240), max(S(140), (int)(cxr - c.left) / 3)); L.search = {cxr - sw, ty2, cxr, ty2 + th}; cxr -= sw + S(10); }
+    L.sub = {c.left + S(22), ty2, cxr, ty2 + th};
+    L.inset = 0; L.rowH = S(45); L.rowRad = SF(12); L.padTop = S(2);
+    if (HasList()) {
+        L.header = {c.left + S(16), c.top + S(60), c.right - S(16), c.top + S(90)};
+        L.list = {c.left + S(16), L.header.bottom, c.right - S(16), c.bottom - S(12)};
+    } else L.list = {c.left + S(16), c.top + S(56), c.right - S(16), c.bottom - S(12)};
+}
+// 4) 물결: 물빛 배경 위 반투명 판. 위 한 줄 도구 막대 + 왼쪽 트리 + 목록
+static void LayoutMul(int W, int H, bool busy) {
+    L.top = {S(16), S(14), W - S(16), S(76)};
+    int x = L.top.left + S(12), by = L.top.top + S(8), bh = S(46);
+    struct { int id; const wchar_t* t; int ic; int st; } tb[] = {{ID_COMPRESS, L"새로 압축", IC_ARCHIVE, BS_ACCENT}, {ID_SPLIT, L"분할 압축", IC_SPLIT, BS_TOOL},
+                                                                 {ID_EXTRACT_ALL, L"압축 해제", IC_EXTRACT, BS_TOOL}, {ID_BROWSE, L"내 PC", IC_DRIVE, BS_TOOL}};
+    for (auto& b : tb) {
+        int w = BtnW(b.t, b.st == BS_ACCENT ? g_fontBold : g_font, true) + S(4);
+        AddB(b.id, {x, by, x + w, by + bh}, b.t, b.ic, b.st, b.id == ID_BROWSE || !busy, b.id == ID_BROWSE && g_fs);
+        x += w + S(4);
+    }
+    L.groups.push_back({{x + S(6), by + S(9), x + S(7), by + bh - S(9)}, L""});  // 구분선
+    x += S(16);
+    int w = BtnW(L"파일 추가", g_font, true);
+    AddB(ID_ADD, {x, by, x + w, by + bh}, L"파일 추가", IC_PLUS, BS_TOOL, g_hasArc && !busy && !g_arc.readOnly); x += w + S(4);
+    w = BtnW(L"선택 추출", g_font, true);
+    AddB(ID_EXTRACT_SEL, {x, by, x + w, by + bh}, L"선택 추출", IC_DOWNLOAD, BS_TOOL, g_hasArc && !busy && HasRealSel());
+    int rx = L.top.right - S(10);
+    AddB(ID_THEME, {rx - bh, by, rx, by + bh}, L"", IC_THEME, BS_TOOL, true); rx -= bh + S(2);
+    AddB(ID_SETTINGS, {rx - bh, by, rx, by + bh}, L"", IC_GEAR, BS_TOOL, true);
+    L.side = {S(16), S(88), S(236), H - S(16)};
+    L.groups.push_back({{L.side.left + S(14), L.side.top + S(12), L.side.right - S(10), L.side.top + S(30)}, g_fs ? L"내 PC" : L"이 압축 파일"});
+    L.tree = {L.side.left + S(8), L.side.top + S(34), L.side.right - S(8), L.side.bottom - S(8)};
+    L.treeRowH = S(32);
+    L.panel = {L.side.right + S(12), S(88), W - S(16), H - S(16)};
+    RECT& p = L.panel;
+    TitleRow(p.left + S(20), p.right - S(20), p.top + S(14), S(36), true, min(S(250), max(S(140), (int)(p.right - p.left) / 3)), false);
+    L.sub = {L.title.left, p.top + S(52), p.right - S(20), p.top + S(70)};
+    L.status = {p.left + S(20), p.bottom - S(32), p.right - S(20), p.bottom - S(8)};
+    L.inset = S(10); L.rowH = S(40); L.rowRad = SF(10); L.padTop = 0;
+    if (HasList()) {
+        L.header = {p.left + S(10), p.top + S(80), p.right - S(10), p.top + S(110)};
+        L.list = {p.left + S(10), L.header.bottom, p.right - S(10), L.status.top - S(4)};
+    } else L.list = {p.left + S(10), p.top + S(80), p.right - S(10), L.status.top - S(4)};
+}
+// 5) 별밤: 밤하늘(라이트는 새벽 하늘)에 별, 동그란 버튼이 별자리처럼 이어지고 금빛 강조
+static void LayoutByeol(int W, int H, bool busy) {
+    L.side = {S(18), S(18), S(168), H - S(18)};
+    int cx = (L.side.left + L.side.right) / 2, y = L.side.top + S(10);
+    struct { int id; const wchar_t* t; int ic; } ob[] = {{ID_COMPRESS, L"새로 압축", IC_ARCHIVE}, {ID_SPLIT, L"분할 압축", IC_SPLIT},
+                                                         {ID_EXTRACT_ALL, L"압축 해제", IC_EXTRACT}, {ID_BROWSE, L"내 PC", IC_DRIVE}};
+    int step = min(S(100), max(S(80), (int)(L.side.bottom - L.side.top - S(150)) / 4));
+    for (int i = 0; i < 4; i++) {
+        AddB(ob[i].id, {cx - S(50), y, cx + S(50), y + S(54) + S(24)}, ob[i].t, ob[i].ic, BS_ORB, ob[i].id == ID_BROWSE || !busy,
+             (i == 0 && !g_fs) || (ob[i].id == ID_BROWSE && g_fs));
+        y += step;
+    }
+    int sb = S(40);
+    AddB(ID_THEME, {cx - sb / 2, L.side.bottom - sb, cx + sb / 2, L.side.bottom}, L"", IC_THEME, BS_ORBSM, true);
+    AddB(ID_SETTINGS, {cx - sb / 2, L.side.bottom - 2 * sb - S(10), cx + sb / 2, L.side.bottom - sb - S(10)}, L"", IC_GEAR, BS_ORBSM, true);
+    L.panel = {L.side.right + S(12), S(18), W - S(18), H - S(18)};
+    RECT& p = L.panel;
+    int by = p.top + S(20), bh = S(34), x = p.right - S(26);
+    int w = BtnW(L"선택 추출", g_fontBold, true);
+    AddB(ID_EXTRACT_SEL, {x - w, by, x, by + bh}, L"선택 추출", IC_DOWNLOAD, BS_ACCENT, g_hasArc && !busy && HasRealSel()); x -= w + S(8);
+    w = BtnW(L"파일 추가", g_font, true);
+    AddB(ID_ADD, {x - w, by, x, by + bh}, L"파일 추가", IC_PLUS, BS_OUTLINE, g_hasArc && !busy && !g_arc.readOnly); x -= w + S(8);
+    TitleRow(p.left + S(26), x, by, bh, true, min(S(220), max(S(130), (x - (int)p.left) / 3)), true);
+    L.sub = {L.title.left, by + bh + S(4), p.right - S(26), by + bh + S(22)};
+    L.status = {p.left + S(26), p.bottom - S(32), p.right - S(26), p.bottom - S(8)};
+    L.inset = S(6); L.rowH = S(44); L.rowRad = SF(12); L.padTop = S(2);
+    if (HasList()) {
+        L.header = {p.left + S(20), p.top + S(98), p.right - S(20), p.top + S(128)};
+        L.list = {p.left + S(20), L.header.bottom, p.right - S(20), L.status.top - S(4)};
+    } else L.list = {p.left + S(20), p.top + S(98), p.right - S(20), L.status.top - S(4)};
 }
 
 static void BuildTreeRows() {
@@ -1288,6 +1484,11 @@ static void DoLayout() {
     case TH_MIDNIGHT: LayoutMidnight(W, H, busy); break;
     case TH_PASTEL: LayoutPastel(W, H, busy); break;
     case TH_NORDIC: case TH_NAVY: LayoutTreeSide(W, H, busy); break;
+    case TH_CHAGOK: LayoutChagok(W, H, busy); break;
+    case TH_SHIM: LayoutShim(W, H, busy); break;
+    case TH_BOM: LayoutBom(W, H, busy); break;
+    case TH_MUL: LayoutMul(W, H, busy); break;
+    case TH_BYEOL: LayoutByeol(W, H, busy); break;
     default: LayoutMint(W, H, busy); break;
     }
     BuildTreeRows();
@@ -1373,6 +1574,9 @@ static float BtnRad(const Btn& b) {
     case TH_PASTEL: return (float)h / 2;
     case TH_NORDIC: return SF(6);
     case TH_NAVY: return SF(4);
+    case TH_CHAGOK: return SF(9);
+    case TH_SHIM: case TH_BOM: case TH_BYEOL: return (float)h / 2;
+    case TH_MUL: return SF(12);
     default: return b.style == BS_PILL ? (float)h / 2 : SF(8);
     }
 }
@@ -1494,6 +1698,66 @@ static void DrawBtn(Graphics& g, HDC dc, const Btn& b) {
         break;
     }
     case BS_PROGPILL: DrawProgPill(g, dc, b); break;
+    case BS_LAYER: {  // 차곡: 층층이 쌓인 버튼 (왼쪽 색 띠)
+        bool top = b.id == ID_COMPRESS;
+        COLORREF bg = top ? (hov ? Mix(P.primary, RGB(255, 255, 255), 0.1f) : P.primary) : b.current ? P.sel : hov ? P.hover : P.panel;
+        FillR(g, r, SF(10), bg);
+        if (!top) StrokeR(g, r, SF(10), P.border);
+        COLORREF band = b.id == ID_SPLIT ? P.accent : b.id == ID_EXTRACT_ALL ? P.primary : P.folderFill;
+        GraphicsPath clip;
+        RoundPath(clip, RF(r), SF(10));
+        Region rg(&clip);
+        g.SetClip(&rg);
+        FillR(g, {r.left, r.top, r.left + S(6), r.bottom}, 0, band);
+        g.ResetClip();
+        COLORREF c = !b.enabled ? P.dim : top ? P.onPrimary : P.text;
+        int isz = S(18);
+        DrawIco(g, b.icon, (REAL)r.left + S(18), (REAL)(r.top + r.bottom - isz) / 2, (REAL)isz, c);
+        Txt(dc, {r.left + S(18) + isz + S(10), r.top, r.right - S(6), r.bottom}, b.text, c, g_fontBold);
+        break;
+    }
+    case BS_DOCK: case BS_DOCKACC: {  // 쉼: 아래 작업 줄
+        bool acc = b.style == BS_DOCKACC;
+        COLORREF bg = acc ? (hov ? Mix(P.accent, RGB(255, 255, 255), 0.12f) : P.accent) : hov ? Mix(P.primary, P.onPrimary, 0.14f) : NONE;
+        FillR(g, r, (float)(r.bottom - r.top) / 2, bg);
+        COLORREF c = acc ? P.onAccent : b.enabled ? P.onPrimary : Mix(P.primary, P.onPrimary, 0.45f);
+        if (acc && !b.enabled) c = Mix(P.accent, P.onAccent, 0.5f);
+        iconText(c, g_fontBold, c);
+        break;
+    }
+    case BS_HERO: case BS_HEROW: {  // 봄빛: 그라데이션 띠 위의 단추
+        float rr = (float)(r.bottom - r.top) / 2;
+        if (b.style == BS_HEROW) FillR(g, r, rr, hov ? Mix(P.primary, P.accent, 0.08f) : P.primary);
+        else FillRA(g, r, rr, RGB(0, 0, 0), b.current ? 70 : hov ? 56 : 34);
+        COLORREF c = b.style == BS_HEROW ? P.onPrimary : P.onBand;
+        if (!b.enabled) c = b.style == BS_HEROW ? Mix(P.primary, P.onPrimary, 0.5f) : Mix(P.accent, P.onBand, 0.6f);
+        iconText(c, g_fontBold, c);
+        break;
+    }
+    case BS_HEROICON: {
+        if (hov) FillRA(g, r, SF(8), RGB(0, 0, 0), 40);
+        int isz = S(20);
+        DrawIco(g, b.icon, (REAL)(r.left + r.right - isz) / 2, (REAL)(r.top + r.bottom - isz) / 2, (REAL)isz, P.onBand, NONE, 2.0f);
+        break;
+    }
+    case BS_ORB: case BS_ORBSM: {  // 별밤: 동그란 별 단추 (아래에 이름)
+        bool sm = b.style == BS_ORBSM;
+        int d = sm ? (int)(r.bottom - r.top) : S(54), cx = (r.left + r.right) / 2;
+        RECT c{cx - d / 2, r.top, cx + d / 2, r.top + d};
+        bool on = b.current && b.enabled;
+        if (on) {
+            FillRA(g, {c.left - S(6), c.top - S(6), c.right + S(6), c.bottom + S(6)}, (float)(d + S(12)) / 2, P.accent, 46);
+            FillG(g, c, (float)d / 2, P.accent, P.accent2, 135);
+        } else {
+            FillR(g, c, (float)d / 2, hov ? P.sideHover : P.side);
+            StrokeR(g, c, (float)d / 2, P.border);
+        }
+        COLORREF ic2 = !b.enabled ? P.sideDim : on ? P.onAccent : P.sideText;
+        int isz = sm ? S(18) : S(22);
+        DrawIco(g, b.icon, (REAL)cx - isz / 2, (REAL)(c.top + c.bottom - isz) / 2, (REAL)isz, ic2);
+        if (!sm) Txt(dc, {r.left - S(10), c.bottom + S(4), r.right + S(10), r.bottom}, b.text, b.enabled ? P.text : P.dim, g_fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        break;
+    }
     case BS_RECENT: {
         if (hov) FillR(g, r, SF(6), prs ? P.sel : P.hover);
         int isz = S(16);
@@ -1553,7 +1817,7 @@ static void DrawRows(Graphics& g, HDC dc) {
     SelectClipRgn(dc, clip);
     Region gr(Rect(L.list.left, L.list.top, L.list.right - L.list.left, L.list.bottom - L.list.top));
     g.SetClip(&gr);
-    bool lines = g_ly == TH_NORDIC || g_ly == TH_NAVY;
+    bool lines = g_ly == TH_NORDIC || g_ly == TH_NAVY || g_ly == TH_MUL;
     bool zebra = P.zebra != NONE;
     for (int i = 0; i < (int)g_rows.size(); i++) {
         RECT rr = ItemRect(i);
@@ -1575,13 +1839,15 @@ static void DrawRows(Graphics& g, HDC dc) {
             continue;
         }
         RECT box = rr;
-        if (L.rowRad > 0) box.bottom -= g_ly == TH_PASTEL ? S(4) : S(2);
+        if (L.rowRad > 0) box.bottom -= g_ly == TH_PASTEL || g_ly == TH_CHAGOK ? S(4) : S(2);
+        if (sel && g_ly == TH_CHAGOK) { OffsetRect(&box, S(4), 0); OffsetRect(&rr, S(4), 0); }  // 차곡: 고른 줄이 살짝 빠져나옴
         COLORREF bg = NONE;
         if (zebra && (i % 2) == 0) bg = P.zebra;
         if (g_hoverRow == i) bg = P.hover;
         if (sel) bg = P.sel;
         FillR(g, box, L.rowRad, bg);
-        if (sel && P.selBorder != NONE && g_ly == TH_MIDNIGHT) StrokeR(g, box, L.rowRad, P.selBorder, 1);
+        if (sel && P.selBorder != NONE && (g_ly == TH_MIDNIGHT || g_ly == TH_BYEOL)) StrokeR(g, box, L.rowRad, P.selBorder, 1);
+        if (g_ly == TH_CHAGOK) FillR(g, {box.left + S(8), (box.top + box.bottom) / 2 - S(11), box.left + S(12), (box.top + box.bottom) / 2 + S(11)}, SF(2), r.kind == 1 ? P.folderFill : P.primary);
         if (sel && P.selBar != NONE) { RECT bar{box.left, box.top, box.left + S(3), box.bottom}; FillR(g, bar, 0, P.selBar); }
         if (lines) HLine(g, rr.left, rr.right, rr.bottom - 1, P.lines);
         if (g_focus == i && GetFocus() == g_hwnd && !sel) StrokeR(g, box, L.rowRad, P.dim, 1, true);
@@ -1589,8 +1855,32 @@ static void DrawRows(Graphics& g, HDC dc) {
         int ix = c.name1 - S(2);
         int iy = (box.top + box.bottom - isz) / 2;
         const FsItem* fi = g_fs ? &g_fsItems[(size_t)r.idx] : nullptr;
-        DrawRowIcon(g, r, fi, (REAL)ix, (REAL)iy, (REAL)isz, 1.35f);
-        RECT nr{ix + isz + S(10), box.top, c.name2, box.bottom};
+        if (g_ly == TH_CHAGOK) ix += S(8), c.name2 += 0;
+        if (sel && g_ly == TH_CHAGOK) ix += S(4);
+        int iconW = isz;
+        if (g_ly == TH_BOM && r.kind == 2 && !(fi && fi->drive)) {  // 봄빛: 형식별 색 배지
+            std::wstring ext = r.name.substr(r.name.find_last_of(L'.') == std::wstring::npos ? r.name.size() : r.name.find_last_of(L'.') + 1);
+            CharUpperBuffW(ext.empty() ? nullptr : &ext[0], (DWORD)ext.size());
+            if (ext.size() > 4) ext = ext.substr(0, 4);
+            if (ext.empty()) ext = L"FILE";
+            COLORREF bc = RGB(0x64, 0x74, 0x8b);
+            if (ext == L"XLSX" || ext == L"XLS" || ext == L"CSV") bc = RGB(0x15, 0x80, 0x3d);
+            else if (ext == L"PDF") bc = RGB(0xc2, 0x26, 0x26);
+            else if (ext == L"HWP" || ext == L"HWPX") bc = RGB(0x1d, 0x4e, 0xd8);
+            else if (ext == L"DOC" || ext == L"DOCX") bc = RGB(0x43, 0x38, 0xca);
+            else if (ext == L"PPT" || ext == L"PPTX") bc = RGB(0xc2, 0x41, 0x0c);
+            else if (ext == L"JPG" || ext == L"JPEG" || ext == L"PNG" || ext == L"GIF" || ext == L"BMP" || ext == L"WEBP") bc = RGB(0xbe, 0x18, 0x5d);
+            else if (fi && fi->arc) bc = RGB(0xb4, 0x53, 0x09);
+            iconW = S(42);
+            RECT bd{ix, (box.top + box.bottom) / 2 - S(9), ix + iconW, (box.top + box.bottom) / 2 + S(9)};
+            FillR(g, bd, SF(5), bc);
+            Txt(dc, bd, ext, RGB(255, 255, 255), g_fontTiny, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            if (g_ly == TH_BOM) ix += S(12);
+            DrawRowIcon(g, r, fi, (REAL)ix, (REAL)iy, (REAL)isz, 1.35f);
+            if (g_ly == TH_BOM) { ix -= S(12); iconW = S(42); }
+        }
+        RECT nr{ix + iconW + S(10), box.top, c.name2, box.bottom};
         Txt(dc, nr, r.name, P.text, g_font);
         if (fi) {  // 내 PC: 크기 / 종류
             if (!fi->dir || fi->drive) Txt(dc, {c.size2 - S(84), box.top, c.size2, box.bottom}, fi->size || !fi->drive ? FmtSize(r.us) : L"", P.dim, g_font, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -1632,7 +1922,8 @@ static void DrawHeader(Graphics& g, HDC dc) {
         }
         if (ax) DrawIco(g, g_sortDesc ? IC_CHEVDOWN : IC_CHEVUP, (REAL)ax, (REAL)(h.top + h.bottom - asz) / 2, (REAL)asz, P.accentFg, NONE, 2.2f);
     }
-    if (g_ly == TH_BASIC || g_ly == TH_NORDIC || g_ly == TH_NAVY) HLine(g, h.left + L.inset, h.right - L.inset, h.bottom - 1, P.lines);
+    if (g_ly == TH_BASIC || g_ly == TH_NORDIC || g_ly == TH_NAVY || g_ly == TH_CHAGOK || g_ly == TH_BOM || g_ly == TH_MUL || g_ly == TH_BYEOL)
+        HLine(g, h.left + L.inset, h.right - L.inset, h.bottom - 1, P.lines);
 }
 
 static void DrawEmpty(Graphics& g, HDC dc) {
@@ -1694,6 +1985,256 @@ static void DrawInfoPanel(Graphics& g, HDC dc) {
     }
 }
 
+// 고유 배치 5종 배경·판·글자 (버튼과 목록은 공통 코드가 그림)
+static std::wstring SubLine() {
+    if (g_fs) return g_fsPath.empty() ? L"자주 쓰는 폴더와 드라이브" : g_fsPath;
+    if (g_hasArc) return ArcSummary();
+    return L"압축 파일을 열거나 끌어다 놓으세요";
+}
+static std::wstring StatusLeft() {
+    if (!HasList()) return L"";
+    std::wstring l = SelSummary();
+    return l.empty() ? std::to_wstring(g_rows.size()) + L"개 항목" : l + L" · " + std::to_wstring(g_rows.size()) + L"개 항목";
+}
+static void PaintNew(Graphics& g, HDC dc, int W, int H) {
+    RECT all{0, 0, W, H};
+    std::wstring ratio = g_hasArc ? L"압축률 " + FmtRatio(g_totU, g_totC) : L"";
+    switch (g_ly) {
+    case TH_CHAGOK: {
+        FillR(g, all, 0, P.bg);
+        FillR(g, L.side, 0, P.side);
+        for (auto& gp : L.groups) Txt(dc, gp.rc, gp.label, P.sideDim, g_fontTiny);
+        DrawTree(g, dc);
+        if (!HasList()) Txt(dc, {L.tree.left + S(10), L.tree.top, L.tree.right, L.tree.top + S(30)}, L"열린 파일 없음", P.sideDim, g_font);
+        Txt(dc, L.title, DirTitle(), P.text, g_fontBig);
+        Txt(dc, L.sub, SubLine(), P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        // 차곡차곡 쌓인 카드: 아래에 두 겹이 비쳐 보임
+        RECT c = L.card;
+        FillR(g, {c.left + S(8), c.top + S(8), c.right - S(8), c.bottom + S(8)}, SF(14), Mix(P.bg, P.border, 0.7f));
+        FillR(g, {c.left + S(4), c.top + S(4), c.right - S(4), c.bottom + S(4)}, SF(14), Mix(P.bg, P.border, 1.0f));
+        FillR(g, c, SF(14), P.panel);
+        StrokeR(g, c, SF(14), P.border);
+        // 아래: 상태 + 쌓인 색 막대 (색 부분 = 압축 후 크기, 빈 부분 = 줄어든 만큼)
+        RECT st = L.status;
+        std::wstring l = StatusLeft();
+        int lw = TextW(l, g_fontSmall), rw = TextW(ratio, g_fontSmall);
+        Txt(dc, {st.left, st.top, st.left + lw + S(4), st.bottom}, l, P.dim, g_fontSmall);
+        Txt(dc, {st.right - rw - S(4), st.top, st.right, st.bottom}, ratio, P.dim, g_fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        if (g_hasArc && g_totU) {
+            RECT bar{st.left + lw + S(16), (st.top + st.bottom) / 2 - S(5), st.right - rw - S(16), (st.top + st.bottom) / 2 + S(5)};
+            if (bar.right - bar.left > S(60)) {
+                FillR(g, bar, SF(5), P.track);
+                double f = min(1.0, (double)g_totC / g_totU);
+                int fw = (int)((bar.right - bar.left) * f), x = bar.left;
+                COLORREF cs[3] = {P.primary, P.accent, P.folderFill};
+                GraphicsPath clip;
+                RoundPath(clip, RF(bar), SF(5));
+                Region rg(&clip);
+                g.SetClip(&rg);
+                for (int i = 0; i < 3; i++) { int w = i < 2 ? fw * (i == 0 ? 6 : 3) / 10 : fw - (x - bar.left); FillR(g, {x, bar.top, x + w, bar.bottom}, 0, cs[i]); x += w; }
+                g.ResetClip();
+            }
+        }
+        break;
+    }
+    case TH_SHIM: {
+        FillR(g, all, 0, P.bg);
+        FillR(g, L.side, SF(26), P.side);
+        RECT sh = L.panel; OffsetRect(&sh, 0, S(6));
+        FillRA(g, sh, SF(28), P.text, g_dark ? 40 : 10);
+        FillR(g, L.panel, SF(28), P.panel);
+        Txt(dc, L.title, DirTitle(), P.text, g_fontBig);
+        Txt(dc, L.sub, SubLine(), P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        RECT dsh = L.dock; OffsetRect(&dsh, 0, S(5));
+        FillRA(g, dsh, (float)(dsh.bottom - dsh.top) / 2, RGB(0, 0, 0), g_dark ? 70 : 34);
+        FillR(g, L.dock, (float)(L.dock.bottom - L.dock.top) / 2, P.primary);
+        Txt(dc, L.status, SelSummary(), P.dim, g_fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        break;
+    }
+    case TH_BOM: {
+        FillR(g, all, 0, P.bg);
+        FillG3(g, L.top, 0, P.accent, P.accent2, P.band, 12);
+        Txt(dc, L.title, DirTitle(), P.onBand, g_fontBig);
+        RECT c = L.card;
+        for (int i = 3; i >= 1; i--) { RECT s2 = c; InflateRect(&s2, S(i * 3), S(i * 3)); OffsetRect(&s2, 0, S(6)); FillRA(g, s2, SF(20 + i * 3), P.accent, (BYTE)(g_dark ? 14 : 8)); }
+        FillR(g, c, SF(20), P.panel);
+        Txt(dc, L.sub, g_hasArc ? ArcSummary() + L" · " + ratio : SubLine(), P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        break;
+    }
+    case TH_MUL: {
+        FillG(g, all, 0, P.bg, P.bg2, 60);
+        // 아래쪽 물빛 번짐
+        { GraphicsPath ep; ep.AddEllipse((REAL)-S(100), (REAL)(H - S(180)), (REAL)(W + S(200)), (REAL)S(320));
+          PathGradientBrush pb(&ep); Color cc = GC(P.accent2, g_dark ? 40 : 46); pb.SetCenterColor(cc); Color ec = GC(P.accent2, 0); int n = 1; pb.SetSurroundColors(&ec, &n); g.FillPath(&pb, &ep); }
+        BYTE ga = g_dark ? 160 : 184;
+        FillRA(g, L.top, SF(18), P.panel, ga); StrokeR(g, L.top, SF(18), P.border);
+        FillRA(g, L.side, SF(18), P.panel, (BYTE)(ga - 50)); StrokeR(g, L.side, SF(18), P.border);
+        FillRA(g, L.panel, SF(18), P.panel, ga); StrokeR(g, L.panel, SF(18), P.border);
+        for (auto& gp : L.groups) {
+            if (gp.label.empty()) VLine(g, gp.rc.left, gp.rc.top, gp.rc.bottom, P.lines);
+            else Txt(dc, gp.rc, gp.label, P.sideDim, g_fontTiny);
+        }
+        DrawTree(g, dc);
+        if (!HasList()) Txt(dc, {L.tree.left + S(10), L.tree.top, L.tree.right, L.tree.top + S(30)}, L"열린 파일 없음", P.sideDim, g_font);
+        Txt(dc, L.title, DirTitle(), P.text, g_fontBig);
+        Txt(dc, L.sub, SubLine(), P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        Txt(dc, L.status, StatusLeft(), P.dim, g_fontSmall);
+        Txt(dc, L.status, ratio, P.dim, g_fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        break;
+    }
+    case TH_BYEOL: {
+        FillG(g, all, 0, P.bg2, P.bg, 70);
+        // 별: 창 크기에 맞춰 늘 같은 자리
+        uint32_t seed = 20261102u;
+        auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+        for (int i = 0; i < 110; i++) {
+            int x = (int)(rnd() % (uint32_t)max(1, W)), y = (int)(rnd() % (uint32_t)max(1, H)), sz = 1 + (int)(rnd() % 3);
+            BYTE a = (BYTE)(g_dark ? 110 + rnd() % 130 : 50 + rnd() % 70);
+            FillRA(g, {x, y, x + S(sz), y + S(sz)}, SF(sz), g_dark ? RGB(255, 255, 255) : RGB(0x78, 0x5a, 0xb4), a);
+        }
+        // 별자리 선
+        const Btn* prev = nullptr;
+        for (auto& b : L.btns) {
+            if (b.style != BS_ORB) continue;
+            if (prev) {
+                int cx = (b.rc.left + b.rc.right) / 2;
+                Pen pen(GC(P.accent, 120), SF(1.2f));
+                g.DrawLine(&pen, (REAL)cx, (REAL)prev->rc.bottom + S(4), (REAL)cx, (REAL)b.rc.top - S(6));
+            }
+            prev = &b;
+        }
+        FillRA(g, L.panel, SF(22), P.panel, g_dark ? 242 : 238);
+        StrokeR(g, L.panel, SF(22), Mix(P.border, P.accent, 0.25f));
+        Txt(dc, L.title, DirTitle(), P.text, g_fontBig);
+        Txt(dc, L.sub, SubLine(), P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        Txt(dc, L.status, StatusLeft(), P.dim, g_fontSmall);
+        Txt(dc, L.status, ratio, P.dim, g_fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        break;
+    }
+    }
+}
+// ---- 테마 미리보기 그림 (앨범·설정에서 사용). r 안에 테마 배치를 축소해서 그린다
+static void DrawThemeThumb(Graphics& g, RECT r, int theme, bool dark) {
+    const Palette& Q = *PALS[theme][dark ? 1 : 0];
+    int ly = TH_LAYOUT[theme];
+    auto C = [](COLORREF c, COLORREF f) { return c == NONE ? f : c; };
+    int W = r.right - r.left, H = r.bottom - r.top, x0 = r.left, y0 = r.top;
+    auto R = [&](float a, float b, float c, float d) { return RECT{x0 + (int)(W * a), y0 + (int)(H * b), x0 + (int)(W * c), y0 + (int)(H * d)}; };
+    COLORREF panel = C(Q.panel, Q.bg), sel = C(Q.sel, Q.hover), acc = C(Q.primary, Q.accent), side = C(Q.side, Q.bg);
+    float rad = (float)max(2, W / 28);
+    // 배경
+    {
+        GraphicsPath p; RoundPath(p, RF(r), rad + 2);
+        Region clip(&p);
+        g.SetClip(&clip);
+        FillG(g, r, 0, Q.bg, Q.bg2, 90);
+    }
+    // 목록 줄 (파일 3줄, 가운데 줄 선택)
+    auto rows = [&](RECT a) {
+        int rh = max(4, (int)(a.bottom - a.top) / 6), y = (int)a.top + rh / 2, pad = max(3, W / 30);
+        for (int i = 0; i < 4 && y + rh <= a.bottom; i++, y += rh + rh / 3) {
+            if (i == 1) FillR(g, {a.left + pad / 2, y - 1, a.right - pad / 2, y + rh + 1}, 2, sel);
+            FillR(g, {a.left + pad, y + rh / 4, a.left + pad + rh / 2 + 1, y + rh - rh / 4}, 1, i == 0 ? C(Q.folderFill, Q.accent) : C(Q.fileStroke, Q.dim));
+            FillR(g, {a.left + pad + rh, y + rh / 3, a.left + pad + rh + (a.right - a.left) * (i % 2 ? 40 : 55) / 100, y + rh - rh / 3}, 1, i == 1 ? Q.text : Mix(panel, Q.dim, 0.7f));
+        }
+    };
+    auto pill = [&](RECT a, COLORREF c, COLORREF c2 = NONE) { FillG(g, a, (float)(a.bottom - a.top) / 2, c, c2); };
+    auto card = [&](RECT a, COLORREF c, float rr) { FillRA(g, {a.left + 1, a.top + 2, a.right + 1, a.bottom + 2}, rr, RGB(0, 0, 0), dark ? 60 : 22); FillR(g, a, rr, c); };
+    switch (ly) {
+    case TH_BASIC: {
+        FillR(g, R(0, 0, 1, .2f), 0, C(Q.band, acc));
+        pill(R(.06f, .06f, .3f, .14f), Q.onBand == NONE ? RGB(255, 255, 255) : Q.onBand);
+        FillR(g, R(0, .2f, .26f, 1), 0, side);
+        VLine(g, x0 + (int)(W * .26f), y0 + (int)(H * .2f), r.bottom, Q.border);
+        RECT a = R(.29f, .26f, .97f, .96f); FillR(g, a, 0, panel); rows(a);
+        break;
+    }
+    case TH_MIDNIGHT: {
+        for (int i = 0; i < 4; i++) FillR(g, R(.05f, .1f + i * .13f, .22f, .17f + i * .13f), 2, i == 0 ? sel : Mix(Q.bg, Q.dim, .35f));
+        RECT a = R(.28f, .08f, .96f, .92f); card(a, panel, rad); rows(R(.28f, .22f, .96f, .92f));
+        pill(R(.74f, .12f, .92f, .2f), Q.accent, Q.accent2);
+        break;
+    }
+    case TH_PASTEL: case TH_CHAGOK: {
+        if (ly == TH_PASTEL) {
+            FillR(g, R(.03f, .05f, .16f, .95f), rad, side);
+            for (int i = 0; i < 4; i++) FillR(g, R(.06f, .12f + i * .16f, .13f, .22f + i * .16f), 2, i == 0 ? acc : Mix(side, Q.sideDim == NONE ? Q.dim : Q.sideDim, .5f));
+        } else {
+            for (int i = 0; i < 4; i++) FillR(g, R(.04f + i * .012f, .1f + i * .16f, .24f + i * .012f, .22f + i * .16f), 2, i == 0 ? Q.primary : Mix(Q.bg, Q.dim, .3f));
+        }
+        RECT a = R(ly == TH_PASTEL ? .2f : .32f, .08f, .96f, .92f);
+        if (ly == TH_CHAGOK) { card({a.left + 4, a.top + 4, a.right + 3, a.bottom + 3}, Mix(panel, Q.accent, .25f), rad); }
+        card(a, panel, rad); rows({a.left, a.top + H / 8, a.right, a.bottom});
+        if (ly == TH_CHAGOK) {
+            RECT b = R(.36f, .12f, .92f, .17f);
+            int w = b.right - b.left;
+            FillR(g, {b.left, b.top, b.left + w / 2, b.bottom}, 1, Q.primary);
+            FillR(g, {b.left + w / 2, b.top, b.left + w * 3 / 4, b.bottom}, 1, Q.accent);
+            FillR(g, {b.left + w * 3 / 4, b.top, b.right, b.bottom}, 1, C(Q.folderFill, Q.accent2));
+        } else pill(R(.7f, .12f, .9f, .19f), Q.accent, Q.accent2);
+        break;
+    }
+    case TH_NORDIC: {
+        FillR(g, R(0, 0, .28f, 1), 0, side);
+        for (int i = 0; i < 4; i++) FillR(g, R(.04f, .14f + i * .14f, .24f, .22f + i * .14f), 2, i == 1 ? C(Q.sideSel, sel) : Mix(side, C(Q.sideDim, Q.dim), .3f));
+        RECT a = R(.28f, 0, 1, 1); FillR(g, a, 0, panel);
+        HLine(g, a.left, a.right, y0 + (int)(H * .2f), Q.border);
+        pill(R(.74f, .06f, .94f, .14f), acc);
+        rows(R(.3f, .24f, .98f, .98f));
+        break;
+    }
+    case TH_NAVY: {
+        FillR(g, R(0, 0, 1, .24f), 0, C(Q.band, acc));
+        FillR(g, R(.05f, .08f, .3f, .15f), 1, Q.onBand == NONE ? RGB(255, 255, 255) : Q.onBand);
+        pill(R(.72f, .07f, .94f, .16f), Q.accent, Q.accent2);
+        FillR(g, R(0, .24f, .25f, 1), 0, side);
+        RECT a = R(.28f, .3f, .96f, .95f); card(a, panel, 2); rows(a);
+        break;
+    }
+    case TH_MINT: {
+        FillR(g, R(0, 0, 1, .2f), 0, panel);
+        HLine(g, r.left, r.right, y0 + (int)(H * .2f), Q.border);
+        for (int i = 0; i < 4; i++) FillR(g, R(.05f + i * .13f, .06f, .15f + i * .13f, .14f), 2, i == 0 ? acc : Q.btn);
+        RECT a = R(.04f, .26f, .96f, .95f); card(a, panel, rad); rows(a);
+        break;
+    }
+    case TH_SHIM: {
+        FillR(g, R(.03f, .05f, .14f, .78f), rad, side);
+        RECT a = R(.18f, .06f, .96f, .74f); card(a, panel, rad); rows(a);
+        RECT d = R(.25f, .8f, .75f, .95f); card(d, Q.primary, (float)(d.bottom - d.top) / 2);
+        for (int i = 0; i < 5; i++) { int cx = d.left + (d.right - d.left) * (2 * i + 1) / 10, s = (d.bottom - d.top) / 3; FillR(g, {cx - s, d.top + s, cx + s, d.bottom - s}, (float)s, i == 0 ? Q.accent : Q.onPrimary); }
+        break;
+    }
+    case TH_BOM: {
+        FillG3(g, R(0, 0, 1, .42f), 0, Q.accent, Q.accent2, C(Q.band, Q.accent), 20);
+        FillR(g, R(.06f, .08f, .4f, .16f), 1, C(Q.onBand, RGB(255, 255, 255)));
+        pill(R(.64f, .07f, .94f, .17f), RGB(255, 255, 255));
+        RECT a = R(.05f, .3f, .95f, .96f); card(a, panel, rad); rows({a.left, a.top + H / 10, a.right, a.bottom});
+        break;
+    }
+    case TH_MUL: {
+        FillRA(g, R(.03f, .05f, .97f, .2f), rad, panel, 150);
+        pill(R(.06f, .08f, .26f, .17f), Q.accent, Q.accent2);
+        FillRA(g, R(.03f, .25f, .27f, .95f), rad, panel, 140);
+        RECT a = R(.3f, .25f, .97f, .95f); FillRA(g, a, rad, panel, 200); rows(a);
+        break;
+    }
+    case TH_BYEOL: {
+        unsigned sd = 2463534242u + theme * 7 + dark;
+        auto rnd = [&]() { sd ^= sd << 13; sd ^= sd >> 17; sd ^= sd << 5; return (int)(sd & 0x7fffffff); };
+        for (int i = 0; i < 18; i++) { int sx = r.left + rnd() % W, sy = r.top + rnd() % H; FillRA(g, {sx, sy, sx + 2, sy + 2}, 1, Q.text, 120); }
+        int ox = x0 + (int)(W * .1f), s = max(5, H / 9);
+        for (int i = 0; i < 4; i++) {
+            int oy = y0 + (int)(H * (.14f + i * .2f));
+            if (i) { Pen pn(GC(Q.accent, 110), 1); g.DrawLine(&pn, ox, oy - (int)(H * .2f) + s / 2, ox, oy - s / 2); }
+            FillR(g, {ox - s / 2, oy - s / 2, ox + s / 2, oy + s / 2}, (float)s / 2, i == 0 ? Q.accent : Mix(Q.bg, Q.dim, .5f));
+        }
+        RECT a = R(.22f, .08f, .96f, .92f); card(a, panel, rad); StrokeR(g, a, rad, Mix(panel, Q.accent, .35f)); rows(a);
+        break;
+    }
+    }
+    g.ResetClip();
+}
 static void Paint(HDC dc, int W, int H) {
     Graphics g(dc);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -1728,7 +2269,6 @@ static void Paint(HDC dc, int W, int H) {
     }
     case TH_MIDNIGHT: {
         FillG(g, all, 0, P.bg, P.bg2, 120);
-        Txt(dc, L.logo, APP_NAME, P.sideText, g_fontLogo);
         FillR(g, L.card, SF(10), P.panel);
         StrokeR(g, L.card, SF(10), P.border);
         RECT c = L.card;
@@ -1759,6 +2299,7 @@ static void Paint(HDC dc, int W, int H) {
         StrokeR(g, L.panel, SF(10), P.border);
         HLine(g, L.panel.left + 1, L.panel.right - 1, L.top.bottom, P.border);
         StrokeR(g, L.zone, SF(8), Mix(P.panel, P.dim, 0.45f), 1, true);
+        if (!HasList()) Txt(dc, L.title, DirTitle(), P.text, g_fontTitle);
         std::wstring t = !g_hasArc ? (g_fs ? L"압축 파일을 두 번 누르면 열립니다 · 끌어다 놓으면 새로 압축합니다" : L"파일이나 폴더를 끌어다 놓으면 새로 압축합니다")
                        : g_arc.readOnly ? FormatLabel() + L" 형식은 읽기 전용입니다 · 끌어다 놓으면 새로 압축합니다"
                                         : L"여기로 파일을 끌어다 놓으면 압축 파일에 추가됩니다";
@@ -1771,8 +2312,6 @@ static void Paint(HDC dc, int W, int H) {
     case TH_PASTEL: {
         FillG(g, all, 0, P.bg, P.bg2, 35);
         FillR(g, L.side, SF(22), P.side);
-        FillG(g, L.logo, SF(14), P.accent, P.accent2, 45);
-        Txt(dc, L.logo, L"차", RGB(255, 255, 255), g_fontLogo, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         FillR(g, L.panel, SF(22), P.panel);
         Txt(dc, L.title, DirTitle(), P.text, g_fontBig);
         if (!HasList()) Txt(dc, L.sub, L"압축 파일을 열거나 끌어다 놓으세요", P.dim, g_fontSmall);
@@ -1797,14 +2336,6 @@ static void Paint(HDC dc, int W, int H) {
         FillR(g, all, 0, P.bg);
         FillR(g, L.side, 0, P.side);
         if (!navy) VLine(g, L.side.right - 1, 0, H, P.border);
-        if (navy) {
-            Txt(dc, L.logo, APP_NAME, P.primary, g_fontLogo);
-            Txt(dc, {L.logo.left, L.logo.bottom, L.logo.right, L.logo.bottom + S(18)}, L"압축 · 분할 · 해제", P.sideDim, g_fontTiny);
-        } else {
-            int isz = S(24);
-            DrawIco(g, IC_ARCHIVE, (REAL)L.logo.left, (REAL)(L.logo.top + L.logo.bottom - isz) / 2, (REAL)isz, RGB(0xc2, 0x7c, 0x0e), RGB(0xfb, 0xbf, 0x24), 1.6f);
-            Txt(dc, {L.logo.left + isz + S(10), L.logo.top, L.logo.right, L.logo.bottom}, APP_NAME, P.sideText, g_fontLogo);
-        }
         for (auto& gp : L.groups) Txt(dc, gp.rc, gp.label, P.sideDim, g_fontTiny);
         Txt(dc, L.title, DirTitle(), P.text, g_fontBig);
         Txt(dc, L.sub, g_fs ? (g_fsPath.empty() ? L"자주 쓰는 폴더와 드라이브" : g_fsPath) : g_hasArc ? FileNameOf(g_arc.path) + L" · " + ArcSummary() : L"압축 파일을 열거나 끌어다 놓으세요", P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
@@ -1819,13 +2350,13 @@ static void Paint(HDC dc, int W, int H) {
         if (!HasList()) Txt(dc, {L.tree.left + S(14), L.tree.top, L.tree.right, L.tree.top + S(30)}, L"열린 파일 없음", P.sideDim, g_font);
         break;
     }
+    case TH_CHAGOK: case TH_SHIM: case TH_BOM: case TH_MUL: case TH_BYEOL: PaintNew(g, dc, W, H); break;
     default: {  // 민트
         FillR(g, all, 0, P.panel);
         FillR(g, L.mid, 0, P.listBg);
         HLine(g, 0, W, L.top.bottom - 1, P.border);
         VLine(g, L.side.right - 1, L.side.top, H, P.border);
         VLine(g, L.info.left, L.info.top, H, P.border);
-        Txt(dc, L.logo, APP_NAME, P.accentFg, g_fontLogo);
         for (auto& gp : L.groups) Txt(dc, gp.rc, gp.label, P.sideDim, g_fontTiny);
         DrawTree(g, dc);
         if (!HasList()) Txt(dc, {L.tree.left + S(14), L.tree.top, L.tree.right, L.tree.top + S(30)}, L"열린 파일 없음", P.sideDim, g_font);
@@ -1835,7 +2366,8 @@ static void Paint(HDC dc, int W, int H) {
     }
     if (L.search.right > L.search.left) {
         bool foc = GetFocus() == g_searchEdit;
-        float rad = g_ly == TH_PASTEL ? (float)(L.search.bottom - L.search.top) / 2 : SF(8);
+        bool pill = g_ly == TH_PASTEL || g_ly == TH_SHIM || g_ly == TH_BOM || g_ly == TH_BYEOL;
+        float rad = pill ? (float)(L.search.bottom - L.search.top) / 2 : g_ly == TH_MUL ? SF(12) : SF(8);
         FillR(g, L.search, rad, P.btn);
         StrokeR(g, L.search, rad, foc ? P.accentFg : (P.btnBorder == NONE ? P.border : P.btnBorder), foc ? SF(1.5f) : 1);
         int isz = S(16);
@@ -2605,6 +3137,9 @@ struct SetState {
     RECT e1Box{}, e2Box{}, slider{};
     int hover = 0, press = 0, result = 0;
     bool done = false, drag = false;
+    int scroll = 0, scrollMax = 0, sdragOff = 0;  // 테마 앨범 스크롤
+    bool sdrag = false;
+    RECT album{}, sbar{}, sthumb{};
 };
 static SetState* g_set;
 static bool ShellRegistered();
@@ -2704,18 +3239,23 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
     // 왼쪽 메뉴
     int nw = S(176);
     if (g) { FillR(*g, {0, S(56), nw, H - S(68)}, 0, Mix(P.panel, P.text, g_dark ? 0.04f : 0.025f)); }
-    struct { const wchar_t* t; int ic; } nav[] = {{L"일반", IC_SLIDERS}, {L"프리셋", IC_STACK}, {L"보안 및 기타", IC_SHIELD}};
-    for (int i = 0; i < 3; i++) {
-        RECT r{S(12), S(68) + i * S(46), nw - S(12), S(68) + i * S(46) + S(40)};
-        bool cur = s->page == i;
+    // 메뉴 순서: 일반 · 테마 · 프리셋 · 보안 및 기타 (압축 설정에는 테마 없음). 클릭 id = 1 + 쪽 번호
+    struct { const wchar_t* t; int ic, page; } nav[] = {{L"일반", IC_SLIDERS, 0}, {L"테마", IC_THEME, 3}, {L"프리셋", IC_STACK, 1}, {L"보안 및 기타", IC_SHIELD, 2}};
+    int ni = 0;
+    for (auto& n : nav) {
+        if (n.page == 3 && s->compress) continue;
+        RECT r{S(12), S(68) + ni * S(46), nw - S(12), S(68) + ni * S(46) + S(40)};
+        ni++;
+        bool cur = s->page == n.page;
+        int i = &n - nav;
         if (g) {
             if (cur) FillR(*g, r, SF(8), P.sel);
-            else if (s->hover == 1 + i) FillR(*g, r, SF(8), P.hover);
+            else if (s->hover == 1 + n.page) FillR(*g, r, SF(8), P.hover);
             if (cur) FillR(*g, {r.left, r.top + S(10), r.left + S(3), r.bottom - S(10)}, SF(1.5f), P.accentFg);
             DrawIco(*g, nav[i].ic, (REAL)r.left + S(14), (REAL)(r.top + r.bottom - S(18)) / 2, (REAL)S(18), cur ? P.accentFg : P.dim);
             Txt(dc, {r.left + S(42), r.top, r.right, r.bottom}, nav[i].t, cur ? P.text : P.dim, cur ? g_fontBold : g_font);
         }
-        SetHot(1 + i, r);
+        SetHot(1 + n.page, r);
     }
     int cx = nw + S(26), cr = W - S(26), y = S(70);
     auto head = [&](const wchar_t* t) { T({cx, y, cr, y + S(22)}, t, P.text, g_fontBold); y += S(30); };
@@ -2745,19 +3285,52 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         bool preset = false;
         for (int i = 0; i < 6; i++) { bool c = g_splitMB == SPLIT_PRESETS[i]; preset |= c; chip(30 + i, x, y, SPLIT_CHIPS[i], c && sp, sp); }
         chip(36, x, y, preset ? std::wstring(L"직접 입력…") : SplitLabel(g_splitMB), !preset && sp, sp);
-    } else if (s->page == 0) {
-        head(L"테마");
-        int x = cx;
-        for (int i = 0; i < TH_COUNT; i++) {
-            if (x + TextW(TH_NAMES[i], g_font) + S(26) > cr) { x = cx; y += S(40); }
-            chip(200 + i, x, y, TH_NAMES[i], g_theme == i, true);
-        }
-        y += S(52);
+    } else if (s->page == 3) {
         head(L"색상");
-        x = cx;
+        int x = cx;
         const wchar_t* modes[] = {L"시스템 설정 따르기", L"라이트", L"다크"};
         for (int i = 0; i < 3; i++) chip(60 + i, x, y, modes[i], g_mode == i, true);
-        y += S(52);
+        y += S(48);
+        head(L"테마");
+        // 앨범: 4칸 격자, 이 영역만 스크롤
+        RECT al{cx, y, cr, H - S(68) - S(10)};
+        s->album = al;
+        int cols = 4, gap = S(12), cw = (al.right - al.left - S(14) - (cols - 1) * gap) / cols;
+        int th = cw * 62 / 100, chh = th + S(28), rowsN = (TH_COUNT + cols - 1) / cols;
+        int total = rowsN * (chh + gap) - gap + S(4);
+        s->scrollMax = max(0, total - (int)(al.bottom - al.top));
+        s->scroll = max(0, min(s->scroll, s->scrollMax));
+        int sv = 0;
+        if (g) { sv = SaveDC(dc); IntersectClipRect(dc, al.left, al.top, al.right, al.bottom); g->SetClip(RF(al)); }
+        for (int i = 0; i < TH_COUNT; i++) {
+            int c = i % cols, rw = i / cols;
+            RECT cell{al.left + c * (cw + gap), al.top + S(2) + rw * (chh + gap) - s->scroll, 0, 0};
+            cell.right = cell.left + cw; cell.bottom = cell.top + chh;
+            if (cell.bottom < al.top || cell.top > al.bottom) continue;
+            bool cur = g_theme == i, hv = s->hover == 200 + i;
+            if (g) {
+                FillR(*g, cell, SF(10), cur ? P.sel : hv ? P.hover : P.btn);
+                StrokeR(*g, cell, SF(10), cur ? P.accentFg : (P.btnBorder == NONE ? P.border : P.btnBorder), cur ? SF(2) : 1);
+                RECT tr{cell.left + S(6), cell.top + S(6), cell.right - S(6), cell.top + th};
+                DrawThemeThumb(*g, tr, i, g_dark);
+                g->SetClip(RF(al));
+                Txt(dc, {cell.left + S(4), tr.bottom + S(2), cell.right - S(4), cell.bottom - S(2)}, TH_NAMES[i], cur ? P.accentFg : P.text, cur ? g_fontBold : g_font, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                if (cur) { int k = S(18); RECT ck{tr.right - k - S(4), tr.top + S(4), tr.right - S(4), tr.top + S(4) + k}; FillR(*g, ck, (float)k / 2, P.accentFg); DrawIco(*g, IC_CHECK, (REAL)ck.left + S(3), (REAL)ck.top + S(3), (REAL)(k - S(6)), P.panel, NONE, 2.6f); }
+            }
+            RECT hr{cell.left, max(cell.top, al.top), cell.right, min(cell.bottom, al.bottom)};
+            if (hr.bottom > hr.top) SetHot(200 + i, hr);
+        }
+        if (g) { g->ResetClip(); RestoreDC(dc, sv); }
+        // 스크롤 막대
+        s->sbar = {al.right - S(8), al.top, al.right - S(2), al.bottom};
+        if (s->scrollMax > 0) {
+            int vh = al.bottom - al.top, tl = max(S(30), vh * vh / total);
+            int ty = al.top + (int)((int64_t)(vh - tl) * s->scroll / s->scrollMax);
+            s->sthumb = {s->sbar.left, ty, s->sbar.right, ty + tl};
+            if (g) { FillR(*g, s->sbar, SF(3), P.track); FillR(*g, s->sthumb, SF(3), s->hover == 81 || s->sdrag ? P.dim : P.scroll); }
+            SetHot(81, {s->sbar.left - S(4), al.top, s->sbar.right + S(2), al.bottom});
+        } else s->sthumb = {};
+    } else if (s->page == 0) {
         head(L"프로그램 아이콘");
         for (int i = 0; i < 3; i++) {
             RECT r{cx + i * S(118), y, cx + i * S(118) + S(110), y + S(74)};
@@ -2774,7 +3347,7 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         }
         y += S(90);
         head(L"분할 크기 기본값");
-        x = cx;
+        int x = cx;
         bool preset = false;
         for (int i = 0; i < 6; i++) { bool c = g_splitMB == SPLIT_PRESETS[i]; preset |= c; chip(30 + i, x, y, SPLIT_CHIPS[i], c, true); }
         chip(36, x, y, preset ? std::wstring(L"직접 입력…") : SplitLabel(g_splitMB), !preset, true);
@@ -2844,7 +3417,7 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
             Txt(dc, {cr - S(50), y, cr, y + S(24)}, std::to_wstring(g_opacity) + L"%", P.dim, g_font, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         }
         SetHot(80, s->slider);
-    } else {
+    } else if (s->page == 2) {
         head(L"탐색기");
         T({cx, y, cr - S(60), y + S(24)}, L"우클릭 메뉴에 '" APP_NAME L"' 추가", P.text, g_font);
         bool pkg = PackageRegistered();
@@ -2863,8 +3436,9 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
             toggle(72, cr - S(42), y, RegGet(L"UpdateAuto", 1) != 0, true);
             y += S(34);
             std::wstring url = RegReadStr(REG_KEY, L"UpdateUrl");
-            T({cx, y, cr - S(214), y + S(34)}, url.empty() ? L"업데이트 위치가 없습니다" : url, url.empty() ? P.dim : P.text, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
-            button(73, {cr - S(206), y, cr - S(110), y + S(34)}, L"위치 변경…", false);
+            T({cx, y - S(2), cr - S(214), y + S(16)}, L"GitHub 에서 확인 · 안 되면 사내 위치", P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            T({cx, y + S(16), cr - S(214), y + S(34)}, url.empty() ? L"사내 위치 없음" : L"사내: " + url, url.empty() ? P.dim : P.text, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+            button(73, {cr - S(206), y, cr - S(110), y + S(34)}, L"사내 위치…", false);
             button(74, {cr - S(102), y, cr, y + S(34)}, L"지금 확인", false);
             y += S(48);
         }
@@ -2899,6 +3473,14 @@ static void SetRefresh() {
     RECT cr; GetClientRect(g_set->h, &cr);
     SetDraw(nullptr, nullptr, cr.right, cr.bottom);
     InvalidateRect(g_set->h, nullptr, FALSE);
+}
+static void SetScrollTo(int thumbTop) {  // 막대 위치 → 스크롤 값
+    SetState* s = g_set;
+    int vh = s->album.bottom - s->album.top, tl = s->sthumb.bottom - s->sthumb.top;
+    if (vh - tl <= 0 || s->scrollMax <= 0) return;
+    int v = (int)((int64_t)(thumbTop - s->album.top) * s->scrollMax / (vh - tl));
+    v = max(0, min(s->scrollMax, v));
+    if (v != s->scroll) { s->scroll = v; SetRefresh(); }
 }
 static void SetSlider(int x) {
     RECT r = g_set->slider;
@@ -2961,7 +3543,7 @@ static void SetAppIcon(int sel) {
 
 static void SetClick(int id) {
     SetState* s = g_set;
-    if (id >= 1 && id <= 3) { s->page = id - 1; SetRefresh(); if (s->page == 1 && s->encrypt && s->e1) SetFocus(s->e1); return; }
+    if (id >= 1 && id <= 4) { s->page = id - 1; SetRefresh(); if (s->page == 1 && s->encrypt && s->e1) SetFocus(s->e1); return; }
     if (id >= 10 && id <= 12) {
         s->o.preset = id - 10;
         if (s->compress && !IsTarPath(s->o.target) && !s->o.sfx) {
@@ -3008,8 +3590,8 @@ static void SetClick(int id) {
     if (id == 72) { RegSet(L"UpdateAuto", RegGet(L"UpdateAuto", 1) ? 0 : 1); SetRefresh(); return; }
     if (id == 73) {
         DlgSpec d;
-        d.title = L"업데이트 위치";
-        d.msg = L"새 버전을 올려 두는 공유 폴더나 웹 주소를 넣으세요.\n예) \\\\파일서버\\공유\\차곡   또는   https://intra.sinsul.com/chagok/";
+        d.title = L"사내 업데이트 위치";
+        d.msg = L"새 버전은 GitHub 에서 먼저 확인하고, GitHub 에 연결되지 않을 때 이 위치를 봅니다.\n새 버전을 올려 두는 공유 폴더나 웹 주소를 넣으세요. (비워 두면 GitHub 만 확인)\n예) \\\\파일서버\\공유\\차곡   또는   https://intra.sinsul.com/chagok/";
         d.buttons = {L"확인", L"취소"};
         d.def = 0; d.cancel = 1;
         d.input = true; d.text = true;
@@ -3121,6 +3703,7 @@ static LRESULT CALLBACK SetProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
     case WM_MOUSEMOVE: {
         POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (s->drag) { SetSlider(pt.x); return 0; }
+        if (s->sdrag) { SetScrollTo(pt.y - s->sdragOff); return 0; }
         int hv = 0;
         for (auto& hs : s->hot) if (PtInRect(&hs.second, pt)) hv = hs.first;
         if (hv != s->hover) { s->hover = hv; InvalidateRect(h, nullptr, FALSE); }
@@ -3128,18 +3711,32 @@ static LRESULT CALLBACK SetProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
         TrackMouseEvent(&t);
         return 0;
     }
-    case WM_MOUSELEAVE: if (!s->drag) { s->hover = 0; InvalidateRect(h, nullptr, FALSE); } return 0;
+    case WM_MOUSELEAVE: if (!s->drag && !s->sdrag) { s->hover = 0; InvalidateRect(h, nullptr, FALSE); } return 0;
+    case WM_MOUSEWHEEL:
+        if (s->page == 3 && s->scrollMax > 0) {
+            s->scroll = max(0, min(s->scrollMax, s->scroll - GET_WHEEL_DELTA_WPARAM(w) * S(60) / WHEEL_DELTA));
+            SetRefresh();
+            POINT pt; GetCursorPos(&pt); ScreenToClient(h, &pt);
+            int hv = 0; for (auto& hs : s->hot) if (PtInRect(&hs.second, pt)) hv = hs.first;
+            if (hv != s->hover) { s->hover = hv; InvalidateRect(h, nullptr, FALSE); }
+        }
+        return 0;
     case WM_LBUTTONDOWN: {
         POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         s->press = 0;
         for (auto& hs : s->hot) if (PtInRect(&hs.second, pt)) s->press = hs.first;
         if (s->press == 80) { s->drag = true; SetCapture(h); SetSlider(pt.x); }
+        else if (s->press == 81) {  // 막대 잡기 (빈 곳을 누르면 그 자리로 이동)
+            if (!PtInRect(&s->sthumb, pt)) SetScrollTo(pt.y - (s->sthumb.bottom - s->sthumb.top) / 2);
+            s->sdragOff = pt.y - s->sthumb.top; s->sdrag = true; SetCapture(h);
+        }
         else if (!s->press) SetFocus(h);
         return 0;
     }
     case WM_LBUTTONUP: {
         POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (s->drag) { s->drag = false; ReleaseCapture(); RegSet(L"Opacity", (DWORD)g_opacity); return 0; }
+        if (s->sdrag) { s->sdrag = false; ReleaseCapture(); s->press = 0; InvalidateRect(h, nullptr, FALSE); return 0; }
         int id = 0;
         for (auto& hs : s->hot) if (PtInRect(&hs.second, pt)) id = hs.first;
         if (id && id == s->press) SetClick(id);
@@ -3162,7 +3759,9 @@ static LRESULT CALLBACK SetProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
 }
 
 // compress=true: 압축 설정 (opts 를 채워 돌려줌). false: 일반 설정
+static void AlbumClose();
 static bool RunSettings(bool compress, CompressOpts* opts, int page) {
+    AlbumClose();
     SetState st;
     st.compress = compress;
     st.page = page;
@@ -3693,22 +4292,155 @@ static void SetThemeMode(int theme, int mode) {
     if (changed && g_hasArc) { int c = g_cur; std::vector<char> ex = g_expand; ShowDir(c); g_expand = ex; }
     Relayout();
 }
-static void CmdTheme() {
-    std::vector<MItem> v = {{0, L"테마", 2, false, true}};
-    for (int i = 0; i < TH_COUNT; i++) v.push_back({40 + i, TH_NAMES[i], 0, g_theme == i, true});
-    v.push_back({0, L"", 1, false, true});
-    v.push_back({0, L"색상", 2, false, true});
-    v.push_back({21, L"시스템 설정 따르기", 0, g_mode == MODE_SYSTEM, true});
-    v.push_back({22, L"라이트", 0, g_mode == MODE_LIGHT, true});
-    v.push_back({23, L"다크", 0, g_mode == MODE_DARK, true});
-    v.push_back({0, L"", 1, false, true});
-    v.push_back({31, L"설정…", 0, false, true});
-    int id = RunPopup(g_hwnd, BtnScreenRect(ID_THEME), v, g_ly != TH_BASIC && g_ly != TH_PASTEL);
-    if (!id) return;
-    if (id == 31) { RunSettings(false, nullptr, 0); Relayout(); return; }
-    if (id >= 40 && id < 40 + TH_COUNT) SetThemeMode(id - 40, g_mode);
-    else if (id >= 21 && id <= 23) SetThemeMode(g_theme, id - 21);
+// ---- 테마 앨범: 테마 버튼에 커서를 올리거나 누르면 뜬다. 누르면 바로 적용되고 앨범은 그대로, 커서가 벗어나면 닫힌다
+static HWND g_album;
+static int g_albumHover;
+static std::vector<std::pair<int, RECT>> g_albumHot;
+static ULONGLONG g_albumOut;
+static const int AL_COLS = 5;
+static SIZE AlbumSize() {
+    int pad = S(14), cw = S(108), gap = S(8), th = S(66), rows = (TH_COUNT + AL_COLS - 1) / AL_COLS;
+    int w = 2 * pad + AL_COLS * cw + (AL_COLS - 1) * gap;
+    int h = pad + S(22) + S(32) + S(14) + S(22) + rows * (th + S(28)) + (rows - 1) * gap + pad;
+    return {w, h};
 }
+static void AlbumDraw(Graphics* g, HDC dc, int W, int H) {
+    g_albumHot.clear();
+    int pad = S(14), cw = S(108), gap = S(8), th = S(66), y = pad;
+    if (g) {
+        FillR(*g, {0, 0, W, H}, 0, P.panel);
+        StrokeR(*g, {0, 0, W, H}, 0, P.border);
+        Txt(dc, {pad, y, W - pad, y + S(20)}, L"색상", P.dim, g_fontSmall);
+    }
+    y += S(22);
+    const wchar_t* modes[] = {L"시스템 설정 따르기", L"라이트", L"다크"};
+    int x = pad;
+    for (int i = 0; i < 3; i++) {
+        int w = TextW(modes[i], g_font) + S(26);
+        RECT r{x, y, x + w, y + S(32)};
+        bool cur = g_mode == i, hv = g_albumHover == 60 + i;
+        if (g) {
+            FillR(*g, r, SF(16), cur ? P.sel : hv ? P.hover : P.btn);
+            StrokeR(*g, r, SF(16), cur ? P.accentFg : (P.btnBorder == NONE ? P.border : P.btnBorder), cur ? SF(1.4f) : 1);
+            Txt(dc, r, modes[i], cur ? P.accentFg : P.text, cur ? g_fontBold : g_font, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        g_albumHot.push_back({60 + i, r});
+        x += w + S(8);
+    }
+    y += S(32) + S(14);
+    if (g) Txt(dc, {pad, y, W - pad, y + S(20)}, L"테마", P.dim, g_fontSmall);
+    y += S(22);
+    for (int i = 0; i < TH_COUNT; i++) {
+        int c = i % AL_COLS, rw = i / AL_COLS;
+        RECT cell{pad + c * (cw + gap), y + rw * (th + S(28) + gap), 0, 0};
+        cell.right = cell.left + cw; cell.bottom = cell.top + th + S(28);
+        bool cur = g_theme == i, hv = g_albumHover == 200 + i;
+        if (g) {
+            FillR(*g, cell, SF(10), cur ? P.sel : hv ? P.hover : NONE);
+            if (cur || hv) StrokeR(*g, cell, SF(10), cur ? P.accentFg : (P.btnBorder == NONE ? P.border : P.btnBorder), cur ? SF(2) : 1);
+            RECT tr{cell.left + S(5), cell.top + S(5), cell.right - S(5), cell.top + th};
+            DrawThemeThumb(*g, tr, i, g_dark);
+            if (!cur && !hv) StrokeR(*g, tr, SF(6), P.border);
+            Txt(dc, {cell.left + S(2), tr.bottom + S(2), cell.right - S(2), cell.bottom - S(2)}, TH_NAMES[i], cur ? P.accentFg : P.text, cur ? g_fontBold : g_font, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (cur) { int k = S(18); RECT ck{tr.right - k - S(4), tr.top + S(4), tr.right - S(4), tr.top + S(4) + k}; FillR(*g, ck, (float)k / 2, P.accentFg); DrawIco(*g, IC_CHECK, (REAL)ck.left + S(3), (REAL)ck.top + S(3), (REAL)(k - S(6)), P.panel, NONE, 2.6f); }
+        }
+        g_albumHot.push_back({200 + i, cell});
+    }
+}
+static void AlbumClose() {
+    if (!g_album) return;
+    HWND a = g_album; g_album = nullptr;
+    KillTimer(g_hwnd, 79);
+    DestroyWindow(a);
+}
+static void AlbumOpen() {
+    if (g_album) return;
+    RECT btn = BtnScreenRect(ID_THEME), mw; GetWindowRect(g_hwnd, &mw);
+    SIZE sz = AlbumSize();
+    MONITORINFO mi{sizeof(mi)}; GetMonitorInfoW(MonitorFromRect(&btn, MONITOR_DEFAULTTONEAREST), &mi);
+    RECT wa = mi.rcWork;
+    bool leftRail = btn.left - mw.left < S(140) && btn.top - mw.top > S(160);  // 왼쪽 세로 메뉴에 있는 버튼
+    int x, y;
+    if (!leftRail && btn.bottom + S(6) + sz.cy <= wa.bottom) {  // 아래
+        y = btn.bottom + S(6);
+        x = (btn.left + btn.right) / 2 < (mw.left + mw.right) / 2 ? btn.left : btn.right - sz.cx;
+    } else if (btn.right + S(8) + sz.cx <= wa.right) {  // 오른쪽 (아래 끝 맞춤)
+        x = btn.right + S(8);
+        y = btn.bottom - sz.cy;
+    } else {  // 위
+        y = btn.top - S(6) - sz.cy;
+        x = btn.right - sz.cx;
+    }
+    x = max((int)wa.left + S(4), min(x, (int)(wa.right - S(4) - sz.cx)));
+    y = max((int)wa.top + S(4), min(y, (int)(wa.bottom - S(4) - sz.cy)));
+    g_albumHover = 0; g_albumOut = 0;
+    g_album = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"ChagokAlbum", L"", WS_POPUP, x, y, sz.cx, sz.cy, g_hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    DWORD corner = 2;
+    DwmSetWindowAttribute(g_album, 33, &corner, sizeof(corner));
+    ShowWindow(g_album, SW_SHOWNOACTIVATE);
+    SetTimer(g_hwnd, 79, 100, nullptr);
+}
+// 100ms 마다: 커서가 앨범·테마 버튼 밖에 0.4초 넘게 있으면 닫는다
+static void AlbumTick() {
+    if (!g_album) { KillTimer(g_hwnd, 79); return; }
+    HWND fg = GetForegroundWindow();
+    if (fg != g_hwnd && fg != g_album) { AlbumClose(); return; }
+    POINT pt; GetCursorPos(&pt);
+    RECT ar, br = BtnScreenRect(ID_THEME);
+    GetWindowRect(g_album, &ar);
+    InflateRect(&ar, S(6), S(6));
+    InflateRect(&br, S(4), S(4));
+    if (PtInRect(&ar, pt) || PtInRect(&br, pt)) { g_albumOut = 0; return; }
+    if (!g_albumOut) g_albumOut = GetTickCount64();
+    else if (GetTickCount64() - g_albumOut >= 400) AlbumClose();
+}
+static LRESULT CALLBACK AlbumProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
+    switch (m) {
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT cr; GetClientRect(h, &cr);
+        HDC md = CreateCompatibleDC(dc);
+        HBITMAP bm = CreateCompatibleBitmap(dc, cr.right, cr.bottom);
+        HGDIOBJ ob = SelectObject(md, bm);
+        {
+            Graphics g(md);
+            g.SetSmoothingMode(SmoothingModeAntiAlias);
+            g.SetPixelOffsetMode(PixelOffsetModeHalf);
+            AlbumDraw(&g, md, cr.right, cr.bottom);
+        }
+        BitBlt(dc, 0, 0, cr.right, cr.bottom, md, 0, 0, SRCCOPY);
+        SelectObject(md, ob); DeleteObject(bm); DeleteDC(md);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_MOUSEMOVE: {
+        POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (g_albumHot.empty()) { RECT cr; GetClientRect(h, &cr); AlbumDraw(nullptr, nullptr, cr.right, cr.bottom); }
+        int hv = 0;
+        for (auto& hs : g_albumHot) if (PtInRect(&hs.second, pt)) hv = hs.first;
+        if (hv != g_albumHover) { g_albumHover = hv; InvalidateRect(h, nullptr, FALSE); }
+        TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
+        TrackMouseEvent(&t);
+        return 0;
+    }
+    case WM_MOUSELEAVE: g_albumHover = 0; InvalidateRect(h, nullptr, FALSE); return 0;
+    case WM_LBUTTONUP: {
+        POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        int id = 0;
+        for (auto& hs : g_albumHot) if (PtInRect(&hs.second, pt)) id = hs.first;
+        if (id >= 200 && id < 200 + TH_COUNT) SetThemeMode(id - 200, g_mode);
+        else if (id >= 60 && id <= 62) SetThemeMode(g_theme, id - 60);
+        else return 0;
+        if (g_album) InvalidateRect(g_album, nullptr, FALSE);
+        return 0;
+    }
+    }
+    return DefWindowProcW(h, m, w, lp);
+}
+static void CmdTheme() { AlbumOpen(); }
 
 static void ClearSearch();
 static void EnsureVisible(int i);
@@ -4626,7 +5358,11 @@ static void OnJobDone() {
     UpdAfterJob();
 }
 
-// ============================================================ 사내 자동 업데이트
+// ============================================================ 자동 업데이트
+// 확인 순서: ① GitHub 릴리즈(기본) → ② GitHub 에 연결되지 않으면 사내 위치(설정에서 넣은 공유 폴더·웹 주소)
+// GitHub: 최신 릴리즈의 첨부 파일 chagok-update.ini 를 releases/latest/download/ 로 읽고,
+//         설치 파일은 그 버전의 태그(v<버전>) 주소에서 받는다. 검증(SHA-256 + 사내 인증서 지문)은 사내 위치와 같다.
+#define GH_REPO L"https://github.com/sinsul-jhs87/Chagok"
 // 업데이트 위치(공유 폴더 \\서버\공유\차곡 또는 http(s)://주소/)에 두 파일을 둔다:
 //   chagok-update.ini : version=1.12.2 / file=ChagokSetup-1.12.2.exe / sha256=<64자리> / notes=바뀐 점(\n 은 줄바꿈)
 //   ChagokSetup-1.12.2.exe : 사내 인증서로 서명된 설치 프로그램
@@ -4635,7 +5371,7 @@ static void OnJobDone() {
 #ifndef CHAGOK_CERT_THUMB
 #define CHAGOK_CERT_THUMB L""
 #endif
-struct UpdInfo { std::wstring version, file, sha256, notes, base; bool manual = false; std::wstring err; };
+struct UpdInfo { std::wstring version, file, sha256, notes, base, from; bool manual = false; std::wstring err; };
 static UpdInfo* g_updPending = nullptr;   // 작업 중에 찾은 새 버전: 작업이 끝나면 묻는다
 static bool g_updChecking = false;
 static std::wstring AppVersion() {
@@ -4779,21 +5515,38 @@ static bool ParseUpdIni(const std::string& raw, UpdInfo& u) {
     return !u.version.empty() && !u.file.empty() && u.file.find_first_of(L"\\/:") == std::wstring::npos;
 }
 // 뒤에서 확인 → 결과를 WM_APP_UPDATE 로 (새 버전이 없고 자동 확인이면 아무것도 보내지 않음)
+// GitHub → 사내 위치 순서로 chagok-update.ini 를 읽어 u 를 채운다 (u->base 는 들어올 때 사내 위치, 나갈 때 설치 파일 위치)
+static bool UpdFetch(UpdInfo* u, const wchar_t* ghRepo = GH_REPO) {
+    std::string raw;
+    std::wstring err, gerr;
+    // ① GitHub
+    std::wstring gh = ghRepo;
+    bool ok = FetchAll(gh + L"/releases/latest/download/chagok-update.ini", raw, gerr) && ParseUpdIni(raw, *u);
+    if (ok) { u->base = gh + L"/releases/download/v" + u->version + L"/"; u->from = L"GitHub"; }
+    else {
+        if (gerr.empty()) gerr = L"chagok-update.ini 내용이 올바르지 않습니다.";
+        gerr = L"GitHub: " + gerr;
+        // ② 사내 위치
+        if (!u->base.empty()) {
+            *u = UpdInfo{L"", L"", L"", L"", u->base, L"", u->manual, L""};
+            ok = FetchAll(UpdJoin(u->base, L"chagok-update.ini"), raw, err) && ParseUpdIni(raw, *u);
+            if (ok) u->from = L"사내 위치";
+            else { if (err.empty()) err = L"chagok-update.ini 내용이 올바르지 않습니다."; err = gerr + L"\n사내 위치: " + err; }
+        } else err = gerr + L"\n(사내 위치는 정해져 있지 않습니다)";
+    }
+    u->err = ok ? L"" : err;
+    return ok;
+}
 static DWORD WINAPI UpdCheckThread(LPVOID p) {
     UpdInfo* u = (UpdInfo*)p;
-    std::string raw;
-    std::wstring err;
-    bool ok = FetchAll(UpdJoin(u->base, L"chagok-update.ini"), raw, err) && ParseUpdIni(raw, *u);
-    if (!ok && err.empty()) err = L"chagok-update.ini 내용이 올바르지 않습니다.";
-    u->err = ok ? L"" : err;
+    bool ok = UpdFetch(u);
     if (!ok && !u->manual) { delete u; u = nullptr; }
     else if (ok && !u->manual && (VerCmp(u->version, AppVersion()) <= 0 || u->version == RegReadStr(REG_KEY, L"UpdateSkip"))) { delete u; u = nullptr; }
     if (u) PostMessageW(g_hwnd, WM_APP_UPDATE, 0, (LPARAM)u); else g_updChecking = false;
     return 0;
 }
 static void UpdCheck(bool manual) {
-    std::wstring base = RegReadStr(REG_KEY, L"UpdateUrl");
-    if (base.empty()) { if (manual) MsgBox(L"업데이트", L"업데이트 위치가 정해져 있지 않습니다.\n설정 → 보안 및 기타 → 업데이트 위치에서 공유 폴더나 웹 주소를 넣으세요."); return; }
+    std::wstring base = RegReadStr(REG_KEY, L"UpdateUrl");  // 사내 위치 (비어 있으면 GitHub 만)
     if (g_updChecking) return;
     g_updChecking = true;
     UpdInfo* u = new UpdInfo();
@@ -4832,7 +5585,7 @@ static void UpdInstall(UpdInfo* u) {
     DestroyWindow(g_hwnd);  // 설치 프로그램이 파일을 바꿀 수 있게 닫는다 (끝나면 다시 띄워 줌)
 }
 static void UpdAsk(UpdInfo* u) {
-    if (!u->err.empty()) { MsgBox(L"업데이트 확인", L"업데이트 위치를 확인하지 못했습니다.\n" + u->err); delete u; return; }
+    if (!u->err.empty()) { MsgBox(L"업데이트 확인", L"새 버전을 확인하지 못했습니다.\n" + u->err); delete u; return; }
     if (VerCmp(u->version, AppVersion()) <= 0) { MsgBox(L"업데이트 확인", L"지금 쓰는 " + AppVersion() + L" 이 최신 버전입니다."); delete u; return; }
     DlgSpec d;
     d.title = L"새 버전이 있습니다";
@@ -4988,6 +5741,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
         SetTimer(h, 77, 700, nullptr);  // 둘러보는 폴더가 바뀌었는지 확인
         return 0;
     case WM_TIMER:
+        if (w == 78) { KillTimer(h, 78); if (g_hoverId == ID_THEME && IsWindowEnabled(h) && GetForegroundWindow() == h) AlbumOpen(); return 0; }
+        if (w == 79) { AlbumTick(); return 0; }
         if (w == 77) UpdAfterJob();  // 미뤄 둔 업데이트 질문 (작업·다른 창이 끝나면)
         if (w == 77 && g_fs && g_fsWatch != INVALID_HANDLE_VALUE && WaitForSingleObject(g_fsWatch, 0) == WAIT_OBJECT_0) {
             static ULONGLONG last = 0;  // 큰 파일을 쓰는 중이면 알림이 계속 오므로 1.5초에 한 번만
@@ -5087,6 +5842,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
         int hid = HitBtn(p);
         int hr = (hid == 0 && HasList()) ? ItemAt(p) : -1;
         int ht = hid == 0 ? TreeAt(p) : -1;
+        if (hid != g_hoverId && hid == ID_THEME && !g_album) SetTimer(h, 78, 350, nullptr);  // 잠시 머물면 테마 앨범
         if (hid != g_hoverId || hr != g_hoverRow || ht != g_hoverTree) { g_hoverId = hid; g_hoverRow = hr; g_hoverTree = ht; InvalidateRect(h, nullptr, FALSE); }
         TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
         TrackMouseEvent(&t);
@@ -5173,6 +5929,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
         }
         return 0;
     case WM_KEYDOWN: {
+        if (w == VK_ESCAPE && g_album) { AlbumClose(); return 0; }
         if (!HasList()) {
             if (w == 'O' && GetKeyState(VK_CONTROL) < 0) OnCommand(ID_OPEN);
             return 0;
@@ -5413,6 +6170,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&pc);
     pc.lpfnWndProc = PreviewProc;
     pc.lpszClassName = L"ChagokPreview";
+    RegisterClassExW(&pc);
+    pc.lpfnWndProc = AlbumProc;
+    pc.lpszClassName = L"ChagokAlbum";
+    pc.hIcon = nullptr;
     RegisterClassExW(&pc);
 
     int W = S(1100), H = S(700);

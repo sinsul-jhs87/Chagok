@@ -76,8 +76,8 @@ static void ShotsRun() {
     Snap(L"05_selected");
     Arm(L"06_ctxmenu"); CmdContextMenu(ListPoint(fr));
     Arm(L"07_rename"); CmdRename();
-    Arm(L"08_thememenu"); CmdTheme();
-    for (int i = 0; i < 3; i++) { wchar_t n[32]; wsprintfW(n, L"09_settings%d", i); Arm(n); RunSettings(false, nullptr, i); }
+    AlbumOpen(); Pump(700); ShotSave(L"08_album"); AlbumClose();
+    for (int i = 0; i < 4; i++) { wchar_t n[32]; wsprintfW(n, L"09_settings%d", i); Arm(n); RunSettings(false, nullptr, i); }
     for (int i = 0; i < 3; i++) {
         wchar_t n[32]; wsprintfW(n, L"10_compress%d", i);
         CompressOpts o; o.target = L"C:\\자료\\제안서_자료.zip"; o.preset = 0; o.sfx = i == 2;

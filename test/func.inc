@@ -10,9 +10,24 @@ static int RowOf(const wchar_t* name) {
     for (size_t i = 0; i < g_rows.size(); i++) if (!lstrcmpiW(g_rows[i].name.c_str(), name)) return (int)i;
     return -1;
 }
+// 자동 업데이트 출처 검사: UPD_GH(가짜 GitHub 주소, 꺼진 주소) UPD_LOCAL(사내 폴더)
+static void UpdTest() {
+    std::wstring gh = EnvW(L"UPD_GH"), down = EnvW(L"UPD_GH_DOWN"), local = EnvW(L"UPD_LOCAL");
+    { UpdInfo u; u.base = local; bool ok = UpdFetch(&u, gh.c_str());
+      Check(ok && u.from == L"GitHub" && u.version == L"9.9.9" && u.base == gh + L"/releases/download/v9.9.9/", L"GitHub 먼저 (사내 위치가 있어도)");
+      std::string data; std::wstring err;
+      Check(FetchAll(UpdJoin(u.base, u.file), data, err) && Sha256Hex(data) == u.sha256, L"GitHub 설치 파일 받기 + SHA-256"); }
+    { UpdInfo u; u.base = local; bool ok = UpdFetch(&u, down.c_str());
+      Check(ok && u.from == L"사내 위치" && u.version == L"8.8.8" && u.base == local, L"GitHub 안 되면 사내 위치"); }
+    { UpdInfo u; bool ok = UpdFetch(&u, down.c_str());
+      Check(!ok && u.err.find(L"GitHub:") == 0 && u.err.find(L"사내 위치는 정해져") != std::wstring::npos, L"사내 위치 없음 + GitHub 안 됨 → 오류"); }
+    { UpdInfo u; u.base = L"Z:\\nope\\x"; bool ok = UpdFetch(&u, down.c_str());
+      Check(!ok && u.err.find(L"사내 위치:") != std::wstring::npos, L"둘 다 안 됨 → 두 오류 모두"); }
+}
 static void FuncRun() {
     std::wstring dir = EnvW(L"SHOT_BROWSE");
     g_flog = _wfopen(EnvW(L"FUNC_LOG").c_str(), L"w, ccs=UTF-8");
+    if (!EnvW(L"UPD_GH").empty()) { UpdTest(); fclose(g_flog); DestroyWindow(g_hwnd); return; }
     Pump(500);
     EnterBrowse(dir);
     Check(g_fs && !g_hasArc && g_fsPath == FsNorm(dir), L"폴더 열기");
