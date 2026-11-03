@@ -827,9 +827,19 @@ static void SetLevel(IUnknown* handler, const std::wstring& fmtName, bool encryp
             PropVariantInit(&v); v.vt = VT_BSTR; v.bstrVal = SysAllocString(L"HC4");
             names.push_back(L"mf"); vals.push_back(v);
         }
+        // 코어 수: g_zipThreads (설정의 '작업 속도', 0 = 모든 코어). 7z 최대는 RAM 때문에 2개까지
         SYSTEM_INFO si; GetSystemInfo(&si);
-        PropVariantInit(&v); v.vt = VT_UI4; v.ulVal = si.dwNumberOfProcessors;  // 모든 코어 사용
+        UInt32 mt = g_zipThreads > 0 ? (UInt32)g_zipThreads : si.dwNumberOfProcessors;
+        if (fmtName == L"7z" && lv >= 8) mt = std::min<UInt32>(mt, 2);
+        PropVariantInit(&v); v.vt = VT_UI4; v.ulVal = mt;
         names.push_back(L"mt"); vals.push_back(v);
+        // 7z 사전 크기: RAM 을 줄인다 (기본값이면 보통 16MB·최대 64MB → 압축 RAM 수백 MB~수 GB)
+        //   보통 4MB  → 압축 약 50MB, 풀 때 약 26MB (측정: 크기 같고 조금 빠름)
+        //   최대 16MB → 압축 약 200MB, 풀 때 약 75MB
+        if (fmtName == L"7z" && lv > 3) {
+            PropVariantInit(&v); v.vt = VT_BSTR; v.bstrVal = SysAllocString(lv >= 8 ? L"16m" : L"4m");
+            names.push_back(L"d"); vals.push_back(v);
+        }
     }
     if (encrypt && fmtName == L"7z") {  // 파일 이름 목록까지 암호화 (암호 없이는 이름도 볼 수 없음)
         PropVariantInit(&v); v.vt = VT_BOOL; v.boolVal = VARIANT_TRUE;

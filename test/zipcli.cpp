@@ -19,10 +19,22 @@ static std::wstring Full(const wchar_t* p) {
     wchar_t b[4096]; GetFullPathNameW(p, 4096, b, nullptr); return b;
 }
 
+#include <psapi.h>
+// ZSTATS=1 이면 끝날 때 CPU 시간·최대 메모리를 stderr 로 (속도 측정용)
+static void PrintStats() {
+    FILETIME a, b, k, u;
+    PROCESS_MEMORY_COUNTERS pm{sizeof(pm)};
+    GetProcessTimes(GetCurrentProcess(), &a, &b, &k, &u);
+    GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof(pm));
+    auto sec = [](FILETIME f) { return (((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) / 1e7; };
+    fprintf(stderr, "ZSTATS cpu=%.2f peak=%.1f\n", sec(k) + sec(u), pm.PeakWorkingSetSize / 1048576.0);
+}
 int wmain(int argc, wchar_t** argv) {
+    if (_wgetenv(L"ZSTATS")) atexit(PrintStats);
     if (argc < 3) return 2;
     std::wstring cmd = argv[1], err;
     if (const wchar_t* lv = _wgetenv(L"ZLEVEL")) g_zipLevel = _wtoi(lv);
+    if (const wchar_t* t = _wgetenv(L"ZTHREADS")) g_zipThreads = _wtoi(t);
     Job job;
     if (_wgetenv(L"PROGMON")) {  // 진행 값 감시 (0.5초마다 출력)
         static Job* pj = &job;

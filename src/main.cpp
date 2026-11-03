@@ -27,6 +27,7 @@ using namespace Gdiplus;
 
 // ============================================================ 설정/테마
 #include "themes.h"
+#include "quickname.h"
 // 테마 = 화면 배치 + 색상표. 배치는 TH_BASIC~TH_MINT 6가지와 고유 배치 TH_CHAGOK~TH_BYEOL 5가지.
 // 배치 비교는 반드시 g_ly 로 한다(g_theme 아님)
 enum { TH_BASIC, TH_MIDNIGHT, TH_PASTEL, TH_NORDIC, TH_NAVY, TH_MINT,
@@ -688,6 +689,12 @@ static std::vector<JobState*> g_queue;  // 대기 중인 작업 (앞에서부터
 static HANDLE g_jobThread = nullptr;
 static bool g_quitAfterJob = false;
 static bool g_menuCompress = false;  // 우클릭 '압축'으로 실행됨
+enum { QC_NONE, QC_FOLDER, QC_NAME, QC_DATE, QC_EACH, QC_PW };
+static int g_quick = QC_NONE;        // 우클릭 '바로 압축'으로 실행됨: 창 없이 만들고 끝나면 종료
+static std::vector<std::wstring> g_quickMade;  // 바로 압축으로 만든 파일 (끝나면 탐색기에서 보여 줌)
+static bool g_menuDel = false;       // 우클릭 '알아서 풀고 압축 파일 지우기'
+static std::vector<std::wstring> g_menuTop;  // 압축 파일 맨 위 항목 이름 (풀기 전에 기억)
+static bool g_askSkipped = false;    // 덮어쓰기 질문에서 '건너뛰기'를 고른 적 있음 → 압축 파일을 지우지 않음
 #define WM_APP_JOBDONE (WM_APP + 1)
 #define WM_APP_ASK (WM_APP + 2)
 #define WM_APP_PASSWORD (WM_APP + 3)
@@ -3351,6 +3358,12 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         bool preset = false;
         for (int i = 0; i < 6; i++) { bool c = g_splitMB == SPLIT_PRESETS[i]; preset |= c; chip(30 + i, x, y, SPLIT_CHIPS[i], c, true); }
         chip(36, x, y, preset ? std::wstring(L"직접 입력…") : SplitLabel(g_splitMB), !preset, true);
+        y += S(52);
+        head(L"우클릭 메뉴");
+        T({cx, y, cr - S(60), y + S(24)}, L"압축·풀기가 끝나면 탐색기에서 결과 보여 주기", P.text, g_font);
+        toggle(75, cr - S(42), y, RegGet(L"ShowResult", 1) != 0, true);
+        y += S(28);
+        T({cx, y, cr, y + S(36)}, L"새 폴더에 풀었으면 그 폴더를 열고, 같은 폴더에 만들었으면 만든 파일을 선택합니다.\n바로 압축(자료.zip 으로 압축 등)은 설정의 프리셋 형식으로 만듭니다.", P.dim, g_fontSmall, DT_LEFT | DT_WORDBREAK);
     } else if (s->page == 1) {
         head(L"프리셋");
         int gap = S(12), cw = (cr - cx - 2 * gap) / 3, chh = S(118);
@@ -3401,6 +3414,17 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
             y += S(46);
         } else {
             T({cx, y, cr, y + S(20)}, L"암호는 파일을 압축할 때 설정 창에서 켭니다.", P.dim, g_fontSmall);
+            y += S(30);
+        }
+        {   // 작업 속도
+            T({cx, y, cx + S(80), y + S(32)}, L"작업 속도", P.text, g_font);
+            int x = cx + S(86);
+            bool quiet = RegGet(L"CpuMode", 0) == 0;
+            chip(76, x, y, L"조용히 (코어 절반)", quiet, true);
+            chip(77, x, y, L"빠르게 (코어 모두)", !quiet, true);
+            y += S(36);
+            T({cx + S(86), y, cr, y + S(18)}, quiet ? L"다른 프로그램이 CPU 를 쓰면 차곡이 양보합니다."
+                                                   : L"모든 코어로 가장 빠르게 (PC 가 잠시 무거울 수 있음)", P.dim, g_fontSmall);
             y += S(30);
         }
         T({cx, y, cx + S(80), y + S(24)}, L"창 투명도", P.text, g_font);
@@ -3588,6 +3612,8 @@ static void SetClick(int id) {
     if (id >= 60 && id <= 62) { g_mode = id - 60; SetApplyTheme(); return; }
     if (id >= 100 && id <= 102) { SetAppIcon(id - 100); SetRefresh(); return; }
     if (id == 72) { RegSet(L"UpdateAuto", RegGet(L"UpdateAuto", 1) ? 0 : 1); SetRefresh(); return; }
+    if (id == 75) { RegSet(L"ShowResult", RegGet(L"ShowResult", 1) ? 0 : 1); SetRefresh(); return; }
+    if (id == 76 || id == 77) { RegSet(L"CpuMode", id == 77 ? 1 : 0); SetRefresh(); return; }
     if (id == 73) {
         DlgSpec d;
         d.title = L"사내 업데이트 위치";
@@ -3920,8 +3946,16 @@ static void StartJob(JobState* j) {
     }
     StartJobNow(j);
 }
+// 작업 속도 (설정 → 프리셋): 0 조용히(기본) = 코어 절반(최대 4개) + 낮은 우선순위(다른 프로그램이 CPU 를 쓰면 양보), 1 빠르게 = 모든 코어
+static void ApplyCpuMode(bool working) {
+    bool quiet = RegGet(L"CpuMode", 0) == 0;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    g_zipThreads = quiet ? max(1, min(4, (int)si.dwNumberOfProcessors / 2)) : 0;
+    SetPriorityClass(GetCurrentProcess(), working && quiet ? BELOW_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS);
+}
 static void StartJobNow(JobState* j) {
     j->level = PRESET_LEVEL[max(0, min(2, g_preset))];
+    ApplyCpuMode(true);
     g_job = j;
     g_progHidden = false;
     ProgOpen();
@@ -4008,6 +4042,31 @@ static void StartCompress(std::vector<std::wstring> src, bool split) {
     StartJob(j);
 }
 
+// 우클릭 바로 압축: 설정 창 없이 프리셋 형식으로 만든다. 이름은 quickname.h 규칙 (메뉴 글자와 같음), 겹치면 '이름 (2)'
+static bool AskNewPassword(std::wstring& pw, bool sevenZip);
+static void QuickCompress(const std::vector<std::wstring>& src, int mode) {
+    if (src.empty()) return;
+    int preset = g_preset;
+    if (preset > 0 && !SzAvailable()) preset = 0;
+    std::wstring ext = PresetExt(preset), dir = QnParent(src[0]);
+    if (!dir.empty() && dir.back() != L'\\') dir += L'\\';
+    auto job = [&](const std::vector<std::wstring>& items, const std::wstring& stem, const std::wstring& pw) {
+        JobState* j = new JobState();
+        j->kind = JK_COMPRESS;
+        j->sources = items;
+        j->target = UniqueFile(dir + stem, ext);
+        j->password = pw;
+        StartJob(j);
+    };
+    if (mode == QC_EACH) { for (auto& p : src) job({p}, QnStem(p), L""); return; }
+    std::wstring pw;
+    if (mode == QC_PW && !AskNewPassword(pw, ext == L".7z")) return;
+    std::wstring stem = mode == QC_NAME ? QnStem(src[0]) : QnFolderStem(src);
+    if (mode == QC_DATE) stem += L"_" + QnToday();
+    job(src, stem, pw);
+    if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+}
+
 static void CmdCompress(bool split) {
     std::vector<std::wstring> sel = FsSelPaths();
     if (!sel.empty()) {
@@ -4067,6 +4126,10 @@ static bool ExtractAllTo(int mode) {
         if (root.dirs.size() + root.files.size() > 1 && lstrcmpiW(FileNameOf(dir).c_str(), ArchiveStem().c_str()) != 0)
             dest = UniqueDir(dir + L"\\" + ArchiveStem());
     }
+    g_menuTop.clear();
+    for (int d : g_dirs[0].dirs) g_menuTop.push_back(g_dirs[(size_t)d].name);
+    for (int f : g_dirs[0].files) { const std::wstring& n = g_arc.entries[(size_t)f].name; g_menuTop.push_back(n.substr(n.find_last_of(L'/') + 1)); }
+    g_askSkipped = false;
     JobState* j = new JobState();
     j->kind = JK_EXTRACT;
     for (size_t i = 0; i < g_arc.entries.size(); i++) j->idx.push_back((int)i);
@@ -5262,12 +5325,45 @@ static void OpenInExplorer(const std::wstring& p) {
     else ShellExecuteW(g_hwnd, L"open", L"explorer.exe", (L"/select,\"" + p + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
 }
 
+// 탐색기에서 항목들을 선택해 보여 준다 (같은 폴더 창이 열려 있으면 그 창을 쓴다). 항목들은 같은 폴더에 있어야 함
+static void RevealInExplorer(const std::vector<std::wstring>& items) {
+    if (items.empty()) return;
+    PIDLIST_ABSOLUTE folder = ILCreateFromPathW(ParentOf(items[0]).c_str());
+    if (!folder) return;
+    std::vector<PIDLIST_ABSOLUTE> abs;
+    std::vector<PCUITEMID_CHILD> kids;
+    for (auto& p : items) if (PIDLIST_ABSOLUTE a = ILCreateFromPathW(p.c_str())) { abs.push_back(a); kids.push_back(ILFindLastID(a)); }
+    if (!kids.empty()) SHOpenFolderAndSelectItems(folder, (UINT)kids.size(), kids.data(), 0);
+    for (auto a : abs) ILFree(a);
+    ILFree(folder);
+}
+// 우클릭으로 푼 결과 보여 주기: 새 폴더에 풀었으면 그 폴더를 열고, 같은 폴더에 풀었으면 나온 항목을 선택
+static void RevealExtracted(const std::wstring& dest, const std::wstring& arcParent) {
+    if (lstrcmpiW(FsNorm(dest).c_str(), FsNorm(arcParent).c_str())) { ShellExecuteW(nullptr, L"open", dest.c_str(), nullptr, nullptr, SW_SHOWNORMAL); return; }
+    std::vector<std::wstring> v;
+    for (auto& n : g_menuTop) { std::wstring p = dest + (dest.back() == L'\\' ? L"" : L"\\") + n; if (FileExists(p) || DirExists(p)) v.push_back(p); }
+    RevealInExplorer(v);
+}
+// 압축 파일(분할이면 조각 전부)을 휴지통으로
+static bool RecycleArchive() {
+    std::vector<std::wstring> files = g_arc.isSplit && !g_arc.volumes.empty() ? g_arc.volumes : std::vector<std::wstring>{g_arc.path};
+    g_arc.Close();
+    std::wstring from;
+    for (auto& f : files) { from += f; from += L'\0'; }
+    from += L'\0';
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE; op.pFrom = from.c_str(); op.fFlags = FOF_ALLOWUNDO | FOF_NO_UI;
+    return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+}
+
 static void ShowHashResult(JobState* j);
 static void UpdAfterJob();
+static void ApplyCpuMode(bool working);
 static void OnJobDone() {
     WaitForSingleObject(g_jobThread, INFINITE);
     CloseHandle(g_jobThread);
     g_jobThread = nullptr;
+    if (g_queue.empty()) ApplyCpuMode(false);  // 작업이 모두 끝나면 우선순위를 되돌린다
     HWND fg = GetForegroundWindow();
     bool away = g_progHidden || (fg != g_hwnd && fg != g_prog.h) || IsIconic(g_hwnd);  // 사용자가 다른 일을 하는 중
     ProgClose();
@@ -5280,6 +5376,22 @@ static void OnJobDone() {
     // 다음 작업부터 시작해 두고 결과를 보여 준다
     if (more) { JobState* n = g_queue.front(); g_queue.erase(g_queue.begin()); StartJobNow(n); }
     Relayout();
+    if (j->kind == JK_COMPRESS && g_quick) {  // 우클릭 바로 압축: 창 없이 끝낸다
+        if (j->ok) g_quickMade.push_back(FileExists(j->target) || !FileExists(j->target + L".001") ? j->target : j->target + L".001");
+        else if (!cancelled) MsgBox(L"압축 실패", FileNameOf(j->target) + L"\n" + j->err);
+        if (cancelled) {  // 취소하면 '각각 압축'의 남은 것도 그만
+            for (auto* q : g_queue) delete q;
+            g_queue.clear();
+            if (g_job) g_job->job.cancel = true;
+        }
+        if (!j->reopenPw.empty()) SecureZeroMemory(&j->reopenPw[0], j->reopenPw.size() * sizeof(wchar_t));
+        delete j;
+        if (!Busy()) {
+            if (!g_quickMade.empty() && RegGet(L"ShowResult", 1)) RevealInExplorer(g_quickMade);
+            DestroyWindow(g_hwnd);
+        }
+        return;
+    }
     if (j->kind == JK_COMPRESS) {
         if (j->ok && j->sfx) {
             if (quiet) Notify(L"자동 실행 파일을 만들었습니다", FileNameOf(j->target), j->target);
@@ -5339,7 +5451,13 @@ static void OnJobDone() {
             delete j;
             return;
         } else if (j->ok && g_menuLaunch && g_quietDone && !j->failed) {
-            // 여기에 풀기 / 새 폴더에 풀기: 탐색기에서 바로 보이므로 조용히 종료
+            // 우클릭 풀기: 대화상자 없이 끝낸다 (설정에 따라 결과를 탐색기에서 보여 줌)
+            std::wstring arcParent = ParentOf(g_arc.path);
+            if (g_menuDel) {
+                if (cancelled || g_askSkipped) MsgBox(L"압축 해제 완료", L"건너뛴 항목이 있어 압축 파일은 지우지 않았습니다.\n" + g_arc.path);
+                else if (!RecycleArchive()) MsgBox(L"압축 해제 완료", L"압축은 풀었지만 압축 파일을 휴지통으로 옮기지 못했습니다.\n" + g_arc.path);
+            }
+            if (RegGet(L"ShowResult", 1)) RevealExtracted(j->dest, arcParent);
         } else if (j->ok && quiet && !j->failed) {
             Notify(L"압축 해제 완료", j->dest, j->dest);
         } else if (j->ok) {
@@ -5347,6 +5465,7 @@ static void OnJobDone() {
             d.title = j->failed ? L"일부 항목을 풀지 못했습니다" : L"압축 해제 완료";
             d.msg = j->failed ? std::to_wstring(j->failed) + L"개 항목을 풀지 못했습니다.\n" + j->firstError + L"\n\n위치: " + j->dest
                               : L"다음 위치에 압축을 풀었습니다.\n" + j->dest;
+            if (g_menuDel) d.msg += L"\n\n압축 파일은 지우지 않았습니다.";
             d.buttons = {L"폴더 열기", L"닫기"};
             d.def = 0; d.cancel = 1;
             if (RunDialog(g_hwnd, d) == 0) ShellExecuteW(g_hwnd, L"open", j->dest.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -5983,6 +6102,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
         d.buttons = {L"덮어쓰기", L"모두 덮어쓰기", L"건너뛰기", L"모두 건너뛰기", L"취소"};
         d.def = 0; d.cancel = 4;
         int r = RunDialog(h, d);
+        if (r == 2 || r == 3) g_askSkipped = true;
         return r < 0 ? 4 : r;
     }
     case WM_SETTINGCHANGE:
@@ -6091,7 +6211,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     g_sortDesc = RegGet(L"SortDesc", 0) != 0;
     g_splitMB = max<DWORD>(1, RegGet(L"SplitMB", 100));
 
-    // 명령줄: Chagok.exe [파일] | /compress 경로 | /split 경로 | /x-here|/x-folder|/x-to 압축파일 | /register | /unregister
+    // 명령줄: Chagok.exe [파일] | /compress 경로 | /split 경로 | /x-here|/x-folder|/x-to|/x-smart|/x-del 압축파일 | /register | /unregister
+    //         /c-folder|/c-name|/c-date|/c-each|/c-pw 경로… (우클릭 바로 압축, quickname.h)
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring verb;
@@ -6189,20 +6310,26 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     DoLayout();
     ApplyOpacity(hw);
     // 우클릭 메뉴의 압축/풀기는 메인 창 없이 설정 창·진행 창만 띄운다
-    bool menuJob = verb == L"compress" || verb == L"split" || verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart";
+    int quick = verb == L"c-folder" ? QC_FOLDER : verb == L"c-name" ? QC_NAME : verb == L"c-date" ? QC_DATE : verb == L"c-each" ? QC_EACH : verb == L"c-pw" ? QC_PW : QC_NONE;
+    bool menuJob = verb == L"compress" || verb == L"split" || verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del" || quick;
     g_mainHidden = menuJob;
     if (!menuJob) { ShowWindow(hw, show); UpdateWindow(hw); }
     ShellRefreshPath();
     CleanTemp();
-    if (verb == L"compress" || verb == L"split") {
+    if (quick) {
+        g_quick = quick;
+        if (!paths.empty()) QuickCompress(paths, quick);
+        if (IsWindow(hw) && !Busy()) DestroyWindow(hw);  // 암호 창에서 취소
+    } else if (verb == L"compress" || verb == L"split") {
         if (paths.empty()) DestroyWindow(hw);
         else { g_menuCompress = true; StartCompress(paths, verb == L"split"); }
         if (IsWindow(hw) && !Busy()) DestroyWindow(hw);  // 설정 창에서 취소
-    } else if (verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart") {
+    } else if (verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del") {
         g_menuLaunch = true;
         g_quietDone = verb != L"x-to";
+        g_menuDel = verb == L"x-del";
         if (paths.empty() || !OpenArchive(paths[0]) ||
-            !ExtractAllTo(verb == L"x-smart" ? XT_SMART : verb == L"x-here" ? XT_HERE : verb == L"x-folder" ? XT_FOLDER : XT_PICK))
+            !ExtractAllTo(verb == L"x-smart" || verb == L"x-del" ? XT_SMART : verb == L"x-here" ? XT_HERE : verb == L"x-folder" ? XT_FOLDER : XT_PICK))
             DestroyWindow(hw);
     } else if (verb == L"open") {
         // 우클릭 '차곡으로 열기': 압축 파일 하나면 열고, 그 밖이면 끌어다 놓은 것처럼 압축할지 묻는다

@@ -3,7 +3,7 @@ project(Chagok C CXX RC)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")  # 정적 CRT: 런타임 설치 불필요
 
-add_executable(Chagok WIN32 src/main.cpp src/zipcore.cpp src/zipcrypt.cpp src/szarc.cpp src/miniz.c res/app.rc)
+add_executable(Chagok WIN32 src/main.cpp src/zipcore.cpp src/zipcrypt.cpp src/szarc.cpp src/zeng.cpp src/miniz.c res/app.rc)  # MSVC: zeng 은 miniz 로 (zlib-ng 는 build_mingw.sh)
 target_compile_definitions(Chagok PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00
   MINIZ_NO_ARCHIVE_APIS MINIZ_NO_TIME MINIZ_NO_STDIO MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
 target_link_libraries(Chagok PRIVATE gdiplus dwmapi shlwapi ole32 oleaut32 uuid comdlg32 shell32 bcrypt)

@@ -11,7 +11,17 @@ MZDEF="-DNDEBUG -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_TIME -DMINIZ_NO_STDIO -DMINIZ
 CXXDEF="-std=c++17 -DNDEBUG -DUNICODE -D_UNICODE -municode -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections -Wall -Wno-unused-function"
 $CC -c -O2 $MZDEF -ffunction-sections -fdata-sections src/miniz.c -o build/miniz.o
 for f in zipcore zipcrypt fastcrc; do $CXX -c -O2 $CXXDEF src/$f.cpp -o build/$f.o; done
-ENGINE="build/zipcore.o build/zipcrypt.o build/fastcrc.o build/miniz.o"
+# deflate 엔진: zlib-ng 2.2.2 (zlib 라이선스, SIMD 로 같은 크기에 CPU 시간이 적음). 없으면 받아서 정적 라이브러리로 빌드
+ZNG=build/zlib-ng
+if [ ! -f $ZNG/b/libz-ng.a ]; then
+  rm -rf build/zlib-ng && git clone -q --depth 1 --branch 2.2.2 https://github.com/zlib-ng/zlib-ng.git build/zlib-ng 2>/dev/null
+  printf 'set(CMAKE_SYSTEM_NAME Windows)\nset(CMAKE_C_COMPILER %s)\nset(CMAKE_RC_COMPILER %s)\n' "$CC" "$WINDRES" > build/zng-toolchain.cmake
+  cmake -S $ZNG -B $ZNG/b -DCMAKE_TOOLCHAIN_FILE=$(pwd)/build/zng-toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=OFF \
+    -DBUILD_SHARED_LIBS=OFF -DZLIB_ENABLE_TESTS=OFF -DZLIBNG_ENABLE_TESTS=OFF -DWITH_GTEST=OFF >/dev/null && cmake --build $ZNG/b -j4 >/dev/null
+fi
+$CXX -c -O2 $CXXDEF -DCHAGOK_ZNG -I$ZNG -I$ZNG/b src/zeng.cpp -o build/zeng.o
+$CXX -c -Os $CXXDEF src/zeng.cpp -o build/zeng_mz.o   # 자동 실행 파일 스텁용(miniz, 작게)
+ENGINE="build/zipcore.o build/zipcrypt.o build/fastcrc.o build/zeng.o build/miniz.o $ZNG/b/libz-ng.a"
 $WINDRES -c 65001 res/app.rc -O coff -o build/app.res.o
 $CXX -Os $CXXDEF -mwindows -DCHAGOK_CERT_THUMB="L\"$CERT_THUMB\"" \
   src/main.cpp src/szarc.cpp $ENGINE build/app.res.o -o build/Chagok.exe \
@@ -23,7 +33,7 @@ $WINDRES -c 65001 res/sfx.rc -O coff -o build/sfx.res.o
 # (받는 사람마다 붙는 파일이라 크기 우선: 전체 LTO -Os. 풀기 속도는 deflate 해제가 -Os 와 -O2 에서 같고 CRC 는 fastcrc 가 맡는다)
 $CC -c -Os -flto $MZDEF -ffunction-sections -fdata-sections src/miniz.c -o build/miniz_lto.o
 $CXX -Os -flto $CXXDEF -mwindows \
-  src/sfx.cpp src/zipcore.cpp src/zipcrypt.cpp src/fastcrc.cpp build/miniz_lto.o build/sfx.res.o -o build/ChagokSFX.bin \
+  src/sfx.cpp src/zipcore.cpp src/zipcrypt.cpp src/fastcrc.cpp build/zeng_mz.o build/miniz_lto.o build/sfx.res.o -o build/ChagokSFX.bin \
   -static -s -Wl,--gc-sections -lcomctl32 -lole32 -luuid -lshell32 -lshlwapi -lbcrypt -lgdi32 -luser32
 ls -la build/ChagokSFX.bin
 # 탐색기 메뉴 확장 DLL

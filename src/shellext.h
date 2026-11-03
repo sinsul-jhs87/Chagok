@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <guiddef.h>
-struct ChagokMenuItem { std::wstring verb, label; };  // verb 가 비면 구분선
+struct ChagokMenuItem { std::wstring verb, label; };  // verb 가 - 로 시작하면 구분선
 extern const CLSID CLSID_ChagokShell;
 extern const CLSID CLSID_ChagokCommand;
 #define CHAGOK_COMMAND_CLSID_STR L"{3BF35A03-70EC-4EEF-9CE7-FE2AD74D76A9}"

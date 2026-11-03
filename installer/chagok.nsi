@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "LogicLib.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.14.1"
+  !define VERSION "1.16.0"
 !endif
 !define APPNAME   "차곡"
 !define APPID     "Chagok"
@@ -205,6 +205,7 @@ Section "${APPNAME} 프로그램 (필수)" SecMain
   File "..\build\7-Zip_License.txt"
   File "..\README.md"
   File "..\src\miniz_LICENSE.txt"
+  File "..\src\zlib-ng_LICENSE.txt"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortCut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${EXE}" "" "$INSTDIR\${EXE}" 0
@@ -319,6 +320,7 @@ Section "Uninstall"
   Delete "$INSTDIR\7-Zip_License.txt"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\miniz_LICENSE.txt"
+  Delete "$INSTDIR\zlib-ng_LICENSE.txt"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "${UNINSTKEY}"

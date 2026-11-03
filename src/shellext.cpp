@@ -5,7 +5,10 @@
 //
 //  선택이 압축 파일 1개   → 차곡 ▸ 알아서 풀기 / 현재 폴더에 압축 풀기 / 파일 이름 폴더에 풀기 / 풀 위치 선택… / ─ / 차곡으로 열기
 //     (알아서 풀기: 맨 위 항목이 하나면 현재 폴더에, 여러 개면 파일 이름 폴더를 만들어 그 안에)
-//  그 밖(파일·폴더·여러 개) → 차곡 ▸ 압축하기… / 분할 압축… / ─ / 차곡으로 열기
+//     + 알아서 풀고 압축 파일 지우기 (휴지통으로)
+//  그 밖(파일·폴더·여러 개) → 차곡 ▸ 자료.zip 으로 압축 / (여러 개면) 누른파일.zip 으로 압축 / 자료_20261103.zip 으로 압축
+//                              / (여러 개면) 각각 압축 / 암호 걸어 압축… / ─ / 압축하기… / 분할 압축… / ─ / 차곡으로 열기
+//     이름 규칙은 quickname.h (차곡과 함께 씀). 바로 압축 항목은 설정 창 없이 바로 만든다
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -18,6 +21,7 @@
 #include <vector>
 #include "shellext.h"
 #include "formats.h"
+#include "quickname.h"
 #include "resource.h"
 
 static HINSTANCE g_inst;
@@ -34,6 +38,9 @@ bool ChagokIsArchive(const std::wstring& path) {
     return fmt::IsArchivePath(path);
 }
 std::wstring ChagokArchiveStem(const std::wstring& path) { return fmt::Stem(path); }
+static std::wstring ModuleDir();
+// '자료.zip 으로' / '자료.7z 로' (받침에 따라)
+static std::wstring AsName(const std::wstring& file) { return file + (file.size() > 3 && !lstrcmpiW(file.c_str() + file.size() - 3, L".7z") ? L" 로 압축" : L" 으로 압축"); }
 std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& paths) {
     std::vector<ChagokMenuItem> m;
     if (paths.empty()) return m;
@@ -42,11 +49,19 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
         m.push_back({L"x-here", L"현재 폴더에 압축 풀기"});
         m.push_back({L"x-folder", L"파일 이름 폴더에 풀기"});
         m.push_back({L"x-to", L"풀 위치 선택…"});
+        m.push_back({L"x-del", L"알아서 풀고 압축 파일 지우기"});
     } else {
+        std::wstring ext = QnExt(ModuleDir()), f = QnFolderStem(paths), n = QnStem(paths[0]);
+        m.push_back({L"c-folder", AsName(f + ext)});
+        if (paths.size() > 1 && n != f) m.push_back({L"c-name", AsName(n + ext)});
+        m.push_back({L"c-date", AsName(f + L"_" + QnToday() + ext)});
+        if (paths.size() > 1) m.push_back({L"c-each", L"각각 압축 (" + std::to_wstring(paths.size()) + L"개 → 이름" + ext + L")"});
+        m.push_back({L"c-pw", L"암호 걸어 압축…"});
+        m.push_back({L"-1", L""});  // 구분선
         m.push_back({L"compress", L"압축하기…"});
         m.push_back({L"split", L"분할 압축…"});
     }
-    m.push_back({L"", L""});  // 구분선
+    m.push_back({L"-2", L""});  // 구분선
     m.push_back({L"open", L"차곡으로 열기"});
     return m;
 }
@@ -182,7 +197,7 @@ public:
         UINT id = first;
         cmdOfs.clear();
         for (size_t i = 0; i < items.size(); i++) {
-            if (items[i].verb.empty()) { AppendMenuW(sub, MF_SEPARATOR, 0, nullptr); continue; }
+            if (items[i].verb.empty() || items[i].verb[0] == L'-') { AppendMenuW(sub, MF_SEPARATOR, 0, nullptr); continue; }
             if (id > last) break;
             AppendMenuW(sub, MF_STRING, id++, items[i].label.c_str());
             cmdOfs.push_back((int)i);
@@ -259,7 +274,8 @@ static std::vector<std::wstring> ItemPaths(IShellItemArray* arr) {
     return v;
 }
 static HRESULT DupStr(const std::wstring& s, LPWSTR* out) { return SHStrDupW(s.c_str(), out); }
-static const wchar_t* SUB_VERBS[] = {L"x-smart", L"x-here", L"x-folder", L"x-to", L"compress", L"split", L"", L"open"};
+static const wchar_t* SUB_VERBS[] = {L"x-smart", L"x-here", L"x-folder", L"x-to", L"x-del",
+                                     L"c-folder", L"c-name", L"c-date", L"c-each", L"c-pw", L"-1", L"compress", L"split", L"-2", L"open"};
 
 class CmdBase : public IExplorerCommand {
 protected:
@@ -296,6 +312,13 @@ public:
         if (v == L"x-to") return L"풀 위치 선택…";
         if (v == L"compress") return L"압축하기…";
         if (v == L"split") return L"분할 압축…";
+        if (v == L"x-del") return L"알아서 풀고 압축 파일 지우기";
+        if (v == L"c-folder") return L"폴더 이름으로 압축";
+        if (v == L"c-name") return L"파일 이름으로 압축";
+        if (v == L"c-date") return L"날짜 붙여 압축";
+        if (v == L"c-each") return L"각각 압축";
+        if (v == L"c-pw") return L"암호 걸어 압축…";
+        if (!v.empty() && v[0] == L'-') return L"";
         return L"차곡으로 열기";
     }
     STDMETHODIMP GetTitle(IShellItemArray* arr, LPWSTR* name) override {
@@ -307,12 +330,11 @@ public:
     }
     STDMETHODIMP GetState(IShellItemArray* arr, BOOL, EXPCMDSTATE* st) override {
         *st = ECS_ENABLED;
-        if (verb.empty()) return S_OK;
         auto paths = ItemPaths(arr);
         if (!paths.empty() && !Find(ChagokBuildMenu(paths))) *st = ECS_HIDDEN;  // 선택에 맞지 않는 명령만 숨김
         return S_OK;
     }
-    STDMETHODIMP GetFlags(EXPCMDFLAGS* f) override { *f = verb.empty() ? ECF_ISSEPARATOR : ECF_DEFAULT; return S_OK; }
+    STDMETHODIMP GetFlags(EXPCMDFLAGS* f) override { *f = verb[0] == L'-' ? ECF_ISSEPARATOR : ECF_DEFAULT; return S_OK; }
     STDMETHODIMP Invoke(IShellItemArray* arr, IBindCtx*) override {
         auto paths = ItemPaths(arr);
         if (paths.empty()) return E_INVALIDARG;

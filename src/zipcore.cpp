@@ -2,6 +2,7 @@
 // 컨테이너(분할 .z01/.zip, ZIP64, 한글 파일명)는 직접 처리한다.
 #include "zipcore.h"
 #include "miniz.h"
+#include "zeng.h"
 #include "zipcrypt.h"
 #include "fastcrc.h"
 #include <algorithm>
@@ -462,6 +463,11 @@ static void AesExtra(Bytes& b, const CdRec& r) {
 // (마지막 블록만 FINISH, 나머지는 SYNC_FLUSH 로 바이트 정렬) 순서대로 이어 붙인다. (pigz 방식)
 // 블록마다 CRC 를 따로 구해 crc32_combine 으로 합친다.
 int g_zipLevel = 3;
+int g_zipThreads = 0;  // 쓸 코어 수 (0 = 자동)
+static int ZipThreads(DWORD cores, int cap) {
+    int n = g_zipThreads > 0 ? g_zipThreads : (int)cores;
+    return std::max(1, std::min(n, cap));
+}
 int g_zipNameCP = 0;
 static const size_t BLOCK = 1 << 20;
 
@@ -564,8 +570,8 @@ public:
         ReleaseSRWLockExclusive(&lk);
     }
     void Loop() {
-        mz_stream s{};
-        bool init = mz_deflateInit2(&s, level, MZ_DEFLATED, -MZ_DEFAULT_WINDOW_BITS, 9, MZ_DEFAULT_STRATEGY) == MZ_OK;
+        ZEng* s = ZDefNew(level);
+        bool init = s != nullptr;
         for (;;) {
             AcquireSRWLockExclusive(&lk);
             while (q.empty() && !quit) SleepConditionVariableSRW(&cvWork, &lk, INFINITE, 0);
@@ -576,7 +582,7 @@ public:
             AcquireSRWLockExclusive(&lk); b->done = 1; ReleaseSRWLockExclusive(&lk);
             WakeAllConditionVariable(&cvDone);
         }
-        if (init) mz_deflateEnd(&s);
+        ZDefFree(s);
     }
     // deflate '저장 블록'으로 그대로 감싸기 (압축 안 되는 블록: 거의 복사 속도)
     static void StoredDeflate(Blk* b) {
@@ -594,23 +600,25 @@ public:
             p += k; n -= k;
         } while (n);
     }
-    static void Compress(Blk* b, mz_stream& s, bool init) {
+    static void Compress(Blk* b, ZEng* s, bool init) {
         b->crc = FastCrc32(0, b->in.data(), b->in.size());
         if (b->decide && LooksIncompressible(b->in.data() + (b->in.size() - 65536) / 2, 65536)) b->store = true;
         if (b->store) return;
         if (b->in.size() >= 128 * 1024 && LooksIncompressible(b->in.data(), b->in.size())) { StoredDeflate(b); return; }
-        if (!init || mz_deflateReset(&s) != MZ_OK) { b->fail = true; return; }
+        if (!init || !ZDefReset(s)) { b->fail = true; return; }
         b->out.resize(b->in.size() + b->in.size() / 8 + 1024);
-        s.next_in = b->in.data(); s.avail_in = (unsigned)b->in.size();
+        const uint8_t* in = b->in.data();
+        uint32_t ai = (uint32_t)b->in.size();
         size_t outPos = 0;
         for (;;) {
-            s.next_out = b->out.data() + outPos; s.avail_out = (unsigned)(b->out.size() - outPos);
-            int st = mz_deflate(&s, b->last ? MZ_FINISH : MZ_SYNC_FLUSH);
-            outPos = b->out.size() - s.avail_out;
-            if (st == MZ_STREAM_END) break;
-            if (st != MZ_OK && st != MZ_BUF_ERROR) { b->fail = true; return; }
-            if (!b->last && s.avail_in == 0 && s.avail_out > 0) break;  // SYNC_FLUSH 완료
-            if (s.avail_out == 0) b->out.resize(b->out.size() * 2);
+            uint8_t* out = b->out.data() + outPos;
+            uint32_t ao = (uint32_t)(b->out.size() - outPos);
+            int st = ZDefRun(s, in, ai, out, ao, b->last);
+            outPos = b->out.size() - ao;
+            if (st == ZE_END) break;
+            if (st == ZE_ERR) { b->fail = true; return; }
+            if (!b->last && ai == 0 && ao > 0) break;  // SYNC_FLUSH 완료
+            if (ao == 0) b->out.resize(b->out.size() * 2);
         }
         b->out.resize(outPos);
     }
@@ -632,7 +640,7 @@ bool GzipCompress(const std::wstring& src, const std::wstring& target, const std
     if (!innerName.empty()) { h.str(WToUtf8(innerName)); h.push_back(0); }
     bool ok = w.Write(h);
     SYSTEM_INFO si; GetSystemInfo(&si);
-    int nth = (int)std::max<DWORD>(1, std::min<DWORD>(si.dwNumberOfProcessors, 16));
+    int nth = ZipThreads(si.dwNumberOfProcessors, 16);
     Pool pool;
     pool.level = std::max(1, std::min(9, g_zipLevel));
     pool.Start(nth);
@@ -689,7 +697,7 @@ static bool WriteArchiveBody(VolWriter& w, std::vector<AddItem>& items, ZipArchi
 
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    int nth = (int)std::max<DWORD>(1, std::min<DWORD>(si.dwNumberOfProcessors, 16));
+    int nth = ZipThreads(si.dwNumberOfProcessors, 16);
     Pool pool;
     pool.level = std::max(1, std::min(9, g_zipLevel));
     pool.Start(nth);
@@ -1259,26 +1267,29 @@ bool ExtractEntries(ZipArchive& arc, const std::vector<int>& idxIn, const std::w
                     off += k; left -= k;
                 }
             } else {
-                mz_stream s{};
-                mz_inflateInit2(&s, -MZ_DEFAULT_WINDOW_BITS);
-                for (;;) {
+                ZEng* s = ZInfNew();
+                const uint8_t* in = nullptr;
+                uint32_t ai = 0;
+                if (!s) { ok = false; why = L"메모리 부족: "; }
+                while (s) {
                     if (job.cancel || abortAll) { ok = false; why = L"취소"; break; }
-                    if (s.avail_in == 0 && left) {
+                    if (ai == 0 && left) {
                         size_t k = (size_t)std::min<uint64_t>(left, BUF);
                         if (!arc.vs.Read(off, inb.data(), k)) { ok = false; why = L"읽기 실패: "; break; }
                         decrypt(inb.data(), k);
-                        s.next_in = inb.data(); s.avail_in = (unsigned)k;
+                        in = inb.data(); ai = (uint32_t)k;
                         off += k; left -= k;
                     }
-                    s.next_out = outb.data(); s.avail_out = (unsigned)BUF;
-                    int st = mz_inflate(&s, MZ_NO_FLUSH);
-                    size_t prod = BUF - s.avail_out;
+                    uint8_t* out = outb.data();
+                    uint32_t ao = (uint32_t)BUF;
+                    int st = ZInfRun(s, in, ai, out, ao);
+                    size_t prod = BUF - ao;
                     if (prod && !(ok = put(outb.data(), prod))) break;
-                    if (st == MZ_STREAM_END) break;
-                    if (st < 0 && st != MZ_BUF_ERROR) { ok = false; why = L"데이터 손상: "; break; }
-                    if (prod == 0 && s.avail_in == 0 && left == 0) { ok = false; why = L"데이터가 잘렸습니다: "; break; }
+                    if (st == ZE_END) break;
+                    if (st == ZE_ERR) { ok = false; why = L"데이터 손상: "; break; }
+                    if (prod == 0 && ai == 0 && left == 0) { ok = false; why = L"데이터가 잘렸습니다: "; break; }
                 }
-                mz_inflateEnd(&s);
+                ZInfFree(s);
             }
             if (ok && isAes) {  // 인증 코드(HMAC) 확인: 암호가 틀렸거나 내용이 바뀌었으면 실패
                 // 압축 스트림이 끝났어도 남은 암호문이 있으면 MAC 에 반영
@@ -1309,7 +1320,7 @@ bool ExtractEntries(ZipArchive& arc, const std::vector<int>& idxIn, const std::w
 
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    int nth = (int)std::max<DWORD>(1, std::min<DWORD>(si.dwNumberOfProcessors, 8));
+    int nth = ZipThreads(si.dwNumberOfProcessors, 8);
     nth = (int)std::min<size_t>((size_t)nth, std::max<size_t>(1, tasks.size()));
     struct Ctx { decltype(worker)* f; };
     Ctx ctx{&worker};

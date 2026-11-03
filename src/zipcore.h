@@ -84,6 +84,7 @@ struct AddItem {
 
 // 압축 수준 1(빠름) ~ 9(최대). 기본 3
 extern int g_zipLevel;
+extern int g_zipThreads;  // 압축·해제에 쓸 코어 수 (0 = 자동)
 // ZIP 파일 이름 글자 코드 강제 (0 = 자동, 949 한국어, 65001 UTF-8, 932 일본어, 936 중국어 간체, 437 영어 DOS)
 extern int g_zipNameCP;
 
