@@ -3363,7 +3363,7 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         T({cx, y, cr - S(60), y + S(24)}, L"압축·풀기가 끝나면 탐색기에서 결과 보여 주기", P.text, g_font);
         toggle(75, cr - S(42), y, RegGet(L"ShowResult", 1) != 0, true);
         y += S(28);
-        T({cx, y, cr, y + S(36)}, L"새 폴더에 풀었으면 그 폴더를 열고, 같은 폴더에 만들었으면 만든 파일을 선택합니다.\n바로 압축(자료.zip 으로 압축 등)은 설정의 프리셋 형식으로 만듭니다.", P.dim, g_fontSmall, DT_LEFT | DT_WORDBREAK);
+        T({cx, y, cr, y + S(36)}, L"새 폴더에 풀었으면 다 푼 뒤 그 폴더를 엽니다. (현재 폴더에 풀면 띄우지 않음)\n바로 압축(자료.zip 으로 압축 등)은 만든 파일을 선택하고, 프리셋 형식으로 만듭니다.", P.dim, g_fontSmall, DT_LEFT | DT_WORDBREAK);
     } else if (s->page == 1) {
         head(L"프리셋");
         int gap = S(12), cw = (cr - cx - 2 * gap) / 3, chh = S(118);
@@ -4184,6 +4184,43 @@ static void StartAdd(const std::vector<std::wstring>& src) {
     j->target = g_dirs[(size_t)g_cur].path;
     j->arcPath = g_arc.path;
     StartJob(j);
+}
+// 새 폴더: 지금 보고 있는 압축 파일 위치에 빈 폴더를 만든다 (임시 폴더에 빈 폴더를 만들어 '파일 추가'와 같은 방식으로 넣음)
+static bool NotBusyFor(const wchar_t* what);
+static std::wstring g_newFolderName;  // 만든 뒤 목록에서 골라 줄 이름
+static void NewFolderCreate(const std::wstring& nn) {
+    std::wstring tmp = TempWorkDir(L"newfolder") + L"\\" + nn;
+    if (!CreateDirectoryW(LongPath(tmp).c_str(), nullptr)) { MsgBox(L"새 폴더", L"임시 폴더를 만들 수 없습니다."); return; }
+    g_newFolderName = nn;
+    StartAdd({tmp});
+}
+static void CmdNewFolder() {
+    if (!g_hasArc || g_fs) return;
+    if (g_arc.readOnly) { MsgBox(L"새 폴더", g_arc.readOnlyWhy); return; }
+    if (!NotBusyFor(L"새 폴더")) return;
+    const DirNode& cur = g_dirs[(size_t)g_cur];
+    auto exists = [&](const std::wstring& n) {
+        for (int d : cur.dirs) if (!lstrcmpiW(g_dirs[(size_t)d].name.c_str(), n.c_str())) return true;
+        for (int f : cur.files) { const std::wstring& e = g_arc.entries[(size_t)f].name; if (!lstrcmpiW(e.substr(e.find_last_of(L'/') + 1).c_str(), n.c_str())) return true; }
+        return false;
+    };
+    std::wstring def = L"새 폴더";
+    for (int i = 2; exists(def) && i < 1000; i++) def = L"새 폴더 (" + std::to_wstring(i) + L")";
+    DlgSpec d;
+    d.title = L"새 폴더";
+    d.msg = L"압축 파일 안에 만들 폴더 이름을 입력하세요." + std::wstring(cur.path.empty() ? L"" : L"\n위치: " + cur.path);
+    d.buttons = {L"만들기", L"취소"};
+    d.def = 0; d.cancel = 1;
+    d.input = true; d.text = true;
+    d.inputText = def;
+    if (RunDialog(g_hwnd, d) != 0) return;
+    std::wstring nn = d.inputText;
+    while (!nn.empty() && (nn.back() == L' ' || nn.back() == L'.')) nn.pop_back();
+    while (!nn.empty() && nn[0] == L' ') nn.erase(0, 1);
+    if (nn.empty()) return;
+    if (nn.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) { MsgBox(L"새 폴더", L"이름에 \\ / : * ? \" < > | 는 쓸 수 없습니다."); return; }
+    if (exists(nn)) { MsgBox(L"새 폴더", L"같은 이름이 이미 있습니다: " + nn); return; }
+    NewFolderCreate(nn);
 }
 static void CmdAdd() {
     if (g_arc.readOnly) { MsgBox(L"파일 추가 불가", g_arc.readOnlyWhy); return; }
@@ -5201,6 +5238,8 @@ static void CmdContextMenu(POINT screen) {
     bool file = one >= 0 && g_rows[(size_t)one].kind == 2, dir = one >= 0 && g_rows[(size_t)one].kind == 1;
     bool ro = g_arc.readOnly;
     std::vector<MItem> v;
+    v.push_back({730, L"새 폴더\tCtrl+Shift+N", 0, false, !ro});  // 맨 위
+    v.push_back({0, L"", 1, false, true});
     if (file) {
         v.push_back({701, L"미리보기\tSpace", 0, false, true});
         v.push_back({702, L"바로 열기\tEnter", 0, false, true});
@@ -5225,6 +5264,7 @@ static void CmdContextMenu(POINT screen) {
     int id = RunPopup(g_hwnd, a, v);
     if (id == 725) id = SortMenu(a);
     switch (id) {
+    case 730: CmdNewFolder(); break;
     case 701: CmdPreview(); break;
     case 702: CmdOpenFile(); break;
     case 707: if (dir) NavigateTo(g_rows[(size_t)one].idx); break;
@@ -5326,8 +5366,26 @@ static void OpenInExplorer(const std::wstring& p) {
 }
 
 // 탐색기에서 항목들을 선택해 보여 준다 (같은 폴더 창이 열려 있으면 그 창을 쓴다). 항목들은 같은 폴더에 있어야 함
+// 새로 생긴 항목을 탐색기에 바로 알린다 (탐색기가 변경을 늦게 알아채면 선택·열기가 엉뚱한 곳에서 끝남)
+static void ShellNotifyNew(const std::vector<std::wstring>& items) {
+    for (auto& p : items) SHChangeNotify(DirExists(p) ? SHCNE_MKDIR : SHCNE_CREATE, SHCNF_PATHW | SHCNF_FLUSH, p.c_str(), nullptr);
+    if (!items.empty()) SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSH, ParentOf(items[0]).c_str(), nullptr);
+}
+// 폴더 열기. 차곡이 바로 끝나므로 비동기로 맡기지 않고 열릴 때까지 기다린다 (SEE_MASK_NOASYNC)
+static void OpenFolderNow(const std::wstring& dir) {
+    ShellNotifyNew({dir});
+    SHELLEXECUTEINFOW sei{sizeof(sei)};
+    sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"open";
+    sei.lpFile = dir.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    ShellExecuteExW(&sei);
+}
+// 탐색기에서 항목들을 선택해 보여 준다 (같은 폴더 창이 열려 있으면 그 창을 쓴다). 항목들은 같은 폴더에 있어야 함
 static void RevealInExplorer(const std::vector<std::wstring>& items) {
     if (items.empty()) return;
+    ShellNotifyNew(items);
+    Sleep(300);  // 탐색기 창이 새 항목을 목록에 넣을 시간
     PIDLIST_ABSOLUTE folder = ILCreateFromPathW(ParentOf(items[0]).c_str());
     if (!folder) return;
     std::vector<PIDLIST_ABSOLUTE> abs;
@@ -5337,12 +5395,10 @@ static void RevealInExplorer(const std::vector<std::wstring>& items) {
     for (auto a : abs) ILFree(a);
     ILFree(folder);
 }
-// 우클릭으로 푼 결과 보여 주기: 새 폴더에 풀었으면 그 폴더를 열고, 같은 폴더에 풀었으면 나온 항목을 선택
+// 우클릭으로 푼 결과 보여 주기: 새 폴더에 풀었을 때만 그 폴더를 연다 (현재 폴더에 바로 풀었으면 이미 보고 있으므로 아무것도 안 띄움)
 static void RevealExtracted(const std::wstring& dest, const std::wstring& arcParent) {
-    if (lstrcmpiW(FsNorm(dest).c_str(), FsNorm(arcParent).c_str())) { ShellExecuteW(nullptr, L"open", dest.c_str(), nullptr, nullptr, SW_SHOWNORMAL); return; }
-    std::vector<std::wstring> v;
-    for (auto& n : g_menuTop) { std::wstring p = dest + (dest.back() == L'\\' ? L"" : L"\\") + n; if (FileExists(p) || DirExists(p)) v.push_back(p); }
-    RevealInExplorer(v);
+    if (!lstrcmpiW(FsNorm(dest).c_str(), FsNorm(arcParent).c_str())) return;
+    OpenFolderNow(dest);
 }
 // 압축 파일(분할이면 조각 전부)을 휴지통으로
 static bool RecycleArchive() {
@@ -5366,6 +5422,16 @@ static void OnJobDone() {
     if (g_queue.empty()) ApplyCpuMode(false);  // 작업이 모두 끝나면 우선순위를 되돌린다
     HWND fg = GetForegroundWindow();
     bool away = g_progHidden || (fg != g_hwnd && fg != g_prog.h) || IsIconic(g_hwnd);  // 사용자가 다른 일을 하는 중
+    // 우클릭 작업의 결과 폴더는 진행 창을 닫기 '전에' 연다.
+    // 진행 창을 먼저 닫으면 Windows 가 앞 창(압축 파일이 있던 탐색기 창)을 다시 앞으로 올리고, 차곡은 앞으로 올릴 권한을 잃어
+    // 새로 연 폴더 창이 그 뒤에 숨는다 (큰 파일처럼 진행 창이 떠 있던 경우).
+    {
+        JobState* d = g_job;
+        bool ok = d && d->ok && !d->failed && !d->job.cancel && RegGet(L"ShowResult", 1);
+        AllowSetForegroundWindow(ASFW_ANY);
+        if (ok && d->kind == JK_EXTRACT && g_menuLaunch && g_quietDone)
+            RevealExtracted(d->dest, ParentOf(g_arc.path));
+    }
     ProgClose();
     JobState* j = g_job;
     g_job = nullptr;
@@ -5424,6 +5490,12 @@ static void OnJobDone() {
     } else if (j->kind == JK_ADD || j->kind == JK_MODIFY) {
         std::wstring dir = j->target;
         OpenArchive(j->arcPath, dir);
+        if (!g_newFolderName.empty()) {  // 새 폴더: 만든 폴더를 골라 둔다
+            for (size_t i = 0; i < g_rows.size(); i++)
+                if (g_rows[i].kind == 1 && !lstrcmpiW(g_dirs[(size_t)g_rows[i].idx].name.c_str(), g_newFolderName.c_str())) { SelectRow((int)i, false, false); EnsureVisible((int)i); break; }
+            g_newFolderName.clear();
+            Relayout();
+        }
         if (!j->ok && !cancelled) MsgBox(j->kind == JK_ADD ? L"파일 추가 실패" : j->modifyWhat + L" 실패", j->err);
         else if (j->ok && away) Notify(j->kind == JK_ADD ? L"파일 추가 완료" : j->modifyWhat + L" 완료", FileNameOf(j->arcPath), j->arcPath);
     } else if (j->kind == JK_TEST) {
@@ -5452,12 +5524,10 @@ static void OnJobDone() {
             return;
         } else if (j->ok && g_menuLaunch && g_quietDone && !j->failed) {
             // 우클릭 풀기: 대화상자 없이 끝낸다 (설정에 따라 결과를 탐색기에서 보여 줌)
-            std::wstring arcParent = ParentOf(g_arc.path);
             if (g_menuDel) {
                 if (cancelled || g_askSkipped) MsgBox(L"압축 해제 완료", L"건너뛴 항목이 있어 압축 파일은 지우지 않았습니다.\n" + g_arc.path);
                 else if (!RecycleArchive()) MsgBox(L"압축 해제 완료", L"압축은 풀었지만 압축 파일을 휴지통으로 옮기지 못했습니다.\n" + g_arc.path);
             }
-            if (RegGet(L"ShowResult", 1)) RevealExtracted(j->dest, arcParent);
         } else if (j->ok && quiet && !j->failed) {
             Notify(L"압축 해제 완료", j->dest, j->dest);
         } else if (j->ok) {
@@ -5781,6 +5851,17 @@ static void OnDropPaths(std::vector<std::wstring> files) {
         StartAdd(files);
         return;
     }
+    if (oneArc && fmt::IsPackagePath(files[0])) {  // apk·iso 등: 열어 볼지 압축할지
+        DlgSpec d;
+        d.title = FileNameOf(files[0]);
+        d.msg = L"내용을 열어 볼까요, 이 파일을 압축할까요?";
+        d.buttons = {L"열기", L"압축", L"분할 압축 (" + SplitLabel(g_splitMB) + L")", L"취소"};
+        d.def = 0; d.cancel = 3;
+        int r = RunDialog(g_hwnd, d);
+        if (r == 0) OpenArchive(files[0]);
+        else if (r == 1 || r == 2) StartCompress(files, r == 2);
+        return;
+    }
     if (oneArc) { OpenArchive(files[0]); return; }
     DlgSpec d;
     d.title = L"새로 압축";
@@ -6075,6 +6156,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
         case VK_DELETE: CmdDelete(); return 0;
         case 'F': if (ctrl && g_searchEdit) { SetFocus(g_searchEdit); SendMessageW(g_searchEdit, EM_SETSEL, 0, -1); } return 0;
         case 'A': if (ctrl) { std::fill(g_sel.begin(), g_sel.end(), 1); Relayout(); } return 0;
+        case 'N': if (ctrl && shift && g_hasArc && !g_fs) CmdNewFolder(); return 0;
         case 'O': if (ctrl) OnCommand(ID_OPEN); return 0;
         default: return 0;
         }

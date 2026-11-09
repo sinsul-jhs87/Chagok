@@ -24,10 +24,24 @@ static void UpdTest() {
     { UpdInfo u; u.base = L"Z:\\nope\\x"; bool ok = UpdFetch(&u, down.c_str());
       Check(!ok && u.err.find(L"사내 위치:") != std::wstring::npos, L"둘 다 안 됨 → 두 오류 모두"); }
 }
+// 새 폴더: NF_ARC(쓰기 가능한 압축 파일 복사본)에 '새 폴더' 를 만들고 목록·선택 확인
+static void NfTest(const std::wstring& arc) {
+    Check(OpenArchive(arc), L"압축 파일 열기");
+    size_t before = g_arc.entries.size();
+    NewFolderCreate(L"새 폴더");
+    for (int i = 0; i < 300 && Busy(); i++) Pump(100);
+    Pump(500);
+    bool found = false;
+    for (auto& e : g_arc.entries) if (e.isDir && (e.name == L"새 폴더" || e.name == L"새 폴더/")) found = true;
+    Check(found && g_arc.entries.size() == before + 1, L"새 폴더 항목이 생김");
+    int one = SingleSel();
+    Check(one >= 0 && g_rows[(size_t)one].kind == 1 && g_dirs[(size_t)g_rows[(size_t)one].idx].name == L"새 폴더", L"만든 폴더가 선택됨");
+}
 static void FuncRun() {
     std::wstring dir = EnvW(L"SHOT_BROWSE");
     g_flog = _wfopen(EnvW(L"FUNC_LOG").c_str(), L"w, ccs=UTF-8");
     if (!EnvW(L"UPD_GH").empty()) { UpdTest(); fclose(g_flog); DestroyWindow(g_hwnd); return; }
+    if (!EnvW(L"NF_ARC").empty()) { NfTest(EnvW(L"NF_ARC")); fclose(g_flog); DestroyWindow(g_hwnd); return; }
     Pump(500);
     EnterBrowse(dir);
     Check(g_fs && !g_hasArc && g_fsPath == FsNorm(dir), L"폴더 열기");

@@ -8,6 +8,7 @@
 //     + 알아서 풀고 압축 파일 지우기 (휴지통으로)
 //  그 밖(파일·폴더·여러 개) → 차곡 ▸ 자료.zip 으로 압축 / (여러 개면) 누른파일.zip 으로 압축 / 자료_20261103.zip 으로 압축
 //                              / (여러 개면) 각각 압축 / 암호 걸어 압축… / ─ / 압축하기… / 분할 압축… / ─ / 차곡으로 열기
+//  apk·iso 같은 '압축이 목표가 아닌' 형식(formats.h PACKAGE_EXTS) 하나 → 위 압축 메뉴 + ─ + 알아서 풀기 / 풀 위치 선택…
 //     이름 규칙은 quickname.h (차곡과 함께 씀). 바로 압축 항목은 설정 창 없이 바로 만든다
 #ifndef UNICODE
 #define UNICODE
@@ -44,7 +45,8 @@ static std::wstring AsName(const std::wstring& file) { return file + (file.size(
 std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& paths) {
     std::vector<ChagokMenuItem> m;
     if (paths.empty()) return m;
-    if (paths.size() == 1 && ChagokIsArchive(paths[0])) {
+    bool package = paths.size() == 1 && ChagokIsArchive(paths[0]) && fmt::IsPackagePath(paths[0]);  // apk·iso 등: 압축 위주 + 풀기 일부
+    if (paths.size() == 1 && ChagokIsArchive(paths[0]) && !package) {
         m.push_back({L"x-smart", L"알아서 풀기"});
         m.push_back({L"x-here", L"현재 폴더에 압축 풀기"});
         m.push_back({L"x-folder", L"파일 이름 폴더에 풀기"});
@@ -60,6 +62,12 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
         m.push_back({L"-1", L""});  // 구분선
         m.push_back({L"compress", L"압축하기…"});
         m.push_back({L"split", L"분할 압축…"});
+        if (package) {
+            m.push_back({L"-3", L""});  // 구분선
+            // Windows 11 메뉴는 항목 순서가 고정이라, 압축 항목 아래에 놓을 풀기 항목은 별도 이름(…2)을 쓴다 (실행할 때는 같은 명령)
+            m.push_back({L"x-smart2", L"알아서 풀기"});
+            m.push_back({L"x-to2", L"풀 위치 선택…"});
+        }
     }
     m.push_back({L"-2", L""});  // 구분선
     m.push_back({L"open", L"차곡으로 열기"});
@@ -67,7 +75,9 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
 }
 
 // 차곡 실행. 경로가 많아 명령줄이 길면 목록 파일(@파일)로 넘긴다
-bool ChagokLaunch(const std::wstring& exe, const std::wstring& verb, const std::vector<std::wstring>& paths) {
+bool ChagokLaunch(const std::wstring& exe, const std::wstring& verbIn, const std::vector<std::wstring>& paths) {
+    std::wstring verb = verbIn;
+    if (verb == L"x-smart2" || verb == L"x-to2") verb.pop_back();  // 패키지 메뉴의 풀기 항목
     std::wstring cmd = L"\"" + exe + L"\"";
     bool openArchive = verb == L"open" && paths.size() == 1 && ChagokIsArchive(paths[0]);
     if (!openArchive) cmd += L" /" + verb;
@@ -275,7 +285,7 @@ static std::vector<std::wstring> ItemPaths(IShellItemArray* arr) {
 }
 static HRESULT DupStr(const std::wstring& s, LPWSTR* out) { return SHStrDupW(s.c_str(), out); }
 static const wchar_t* SUB_VERBS[] = {L"x-smart", L"x-here", L"x-folder", L"x-to", L"x-del",
-                                     L"c-folder", L"c-name", L"c-date", L"c-each", L"c-pw", L"-1", L"compress", L"split", L"-2", L"open"};
+                                     L"c-folder", L"c-name", L"c-date", L"c-each", L"c-pw", L"-1", L"compress", L"split", L"-3", L"x-smart2", L"x-to2", L"-2", L"open"};
 
 class CmdBase : public IExplorerCommand {
 protected:
@@ -313,6 +323,8 @@ public:
         if (v == L"compress") return L"압축하기…";
         if (v == L"split") return L"분할 압축…";
         if (v == L"x-del") return L"알아서 풀고 압축 파일 지우기";
+        if (v == L"x-smart2") return L"알아서 풀기";
+        if (v == L"x-to2") return L"풀 위치 선택…";
         if (v == L"c-folder") return L"폴더 이름으로 압축";
         if (v == L"c-name") return L"파일 이름으로 압축";
         if (v == L"c-date") return L"날짜 붙여 압축";

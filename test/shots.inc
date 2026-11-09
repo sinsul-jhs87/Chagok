@@ -76,6 +76,7 @@ static void ShotsRun() {
     Snap(L"05_selected");
     Arm(L"06_ctxmenu"); CmdContextMenu(ListPoint(fr));
     Arm(L"07_rename"); CmdRename();
+    Arm(L"07b_newfolder"); CmdNewFolder();
     AlbumOpen(); Pump(700); ShotSave(L"08_album"); AlbumClose();
     for (int i = 0; i < 4; i++) { wchar_t n[32]; wsprintfW(n, L"09_settings%d", i); Arm(n); RunSettings(false, nullptr, i); }
     for (int i = 0; i < 3; i++) {

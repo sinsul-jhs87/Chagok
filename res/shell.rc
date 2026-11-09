@@ -4,8 +4,8 @@ IDI_APP ICON "app.ico"
 IDI_APP_A ICON "app_a.ico"
 IDI_APP_C ICON "app_c.ico"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,16,0,0
- PRODUCTVERSION 1,16,0,0
+ FILEVERSION 1,18,0,0
+ PRODUCTVERSION 1,18,0,0
  FILEOS 0x40004
  FILETYPE 0x2
 BEGIN
@@ -15,9 +15,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "주식회사신설"
       VALUE "FileDescription", "차곡 탐색기 메뉴"
-      VALUE "FileVersion", "1.16.0"
+      VALUE "FileVersion", "1.18.0"
       VALUE "ProductName", "차곡"
-      VALUE "ProductVersion", "1.16.0"
+      VALUE "ProductVersion", "1.18.0"
     END
   END
   BLOCK "VarFileInfo"

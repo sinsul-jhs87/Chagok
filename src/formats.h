@@ -51,6 +51,12 @@ inline bool IsArchivePath(const std::wstring& path) {
     }
     return false;
 }
+// '압축이 목표가 아닌' 형식: 안이 압축 구조라 열어 볼 수는 있지만 원래 용도는 앱·패키지·디스크 이미지인 파일.
+// 우클릭하면 압축 메뉴가 먼저 나온다 (메일·메신저가 apk 등을 막을 때 zip 으로 감싸 보내기 위해). 분할 조각(.iso.001 등)은 해당 없음
+static const wchar_t* const PACKAGE_EXTS[] = {
+    L"apk", L"aab", L"ipa", L"jar", L"war", L"ear", L"xpi", L"deb", L"rpm",                     // 앱·패키지
+    L"iso", L"img", L"dmg", L"vhd", L"vhdx", L"vmdk", L"wim", L"swm", L"squashfs"};              // 디스크 이미지
+inline bool IsPackagePath(const std::wstring& path) { return In(Ext(path), PACKAGE_EXTS, FMT_COUNT(PACKAGE_EXTS)); }
 // 이 경로를 자체 ZIP 엔진으로 여는가
 inline bool UsesZipEngine(const std::wstring& path) {
     std::wstring e = Ext(path);
