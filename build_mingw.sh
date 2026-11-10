@@ -42,10 +42,14 @@ $CXX -std=c++17 -Os -DNDEBUG -DUNICODE -D_UNICODE -shared -fno-exceptions -fno-r
   src/shellext.cpp src/shellext.def build/shell.res.o -o build/ChagokShell.dll \
   -static -s -Wl,--gc-sections -lshlwapi -lshell32 -lole32 -luuid -lgdi32 -luser32
 ls -la build/ChagokShell.dll
+# 탐색기 미리 보기 창 DLL (prevhost.exe 안에서 압축 파일 목록만 보여 줌. 크기 우선이라 deflate 는 miniz)
+$CXX -Os $CXXDEF -shared src/preview.cpp src/szarc.cpp build/zipcore.o build/zipcrypt.o build/fastcrc.o build/zeng_mz.o build/miniz.o src/preview.def \
+  -o build/ChagokPreview.dll -static -s -Wl,--gc-sections -lole32 -loleaut32 -luuid -lshlwapi -lcomctl32 -luxtheme -lgdi32 -luser32 -lbcrypt
+ls -la build/ChagokPreview.dll
 # 사내 인증서로 실행 파일·메뉴 DLL 서명 (Authenticode)
 sh installer/cert/make_cert.sh >/dev/null
 SIGN() { osslsigncode sign -pkcs12 installer/cert/chagok_sign.pfx -pass "${CHAGOK_PFX_PASS:-chagok}" -h sha256 -n "차곡" -in "$1" -out "$1.signed" >/dev/null && mv "$1.signed" "$1"; }
-SIGN build/Chagok.exe && SIGN build/ChagokShell.dll && echo "Chagok.exe / ChagokShell.dll 서명 완료"
+SIGN build/Chagok.exe && SIGN build/ChagokShell.dll && SIGN build/ChagokPreview.dll && echo "Chagok.exe / ChagokShell.dll / ChagokPreview.dll 서명 완료"
 # Windows 11 첫 화면 메뉴용 스파스 패키지 (사내 인증서로 서명)
 VER=$(grep -m1 '!define VERSION' installer/chagok.nsi | sed 's/.*"\(.*\)".*/\1/')
 sh installer/cert/make_cert.sh >/dev/null

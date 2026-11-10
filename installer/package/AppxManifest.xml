@@ -40,12 +40,16 @@
             <desktop5:ItemType Type="Directory">
               <desktop5:Verb Id="ChagokDir" Clsid="3BF35A03-70EC-4EEF-9CE7-FE2AD74D76A9" />
             </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="ChagokNewFolder" Clsid="D3F472C5-D1C4-45BB-9B69-8EABEECD599C" />
+            </desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:SurrogateServer DisplayName="차곡 탐색기 메뉴">
               <com:Class Id="3BF35A03-70EC-4EEF-9CE7-FE2AD74D76A9" Path="ChagokShell.dll" ThreadingModel="STA" />
+              <com:Class Id="D3F472C5-D1C4-45BB-9B69-8EABEECD599C" Path="ChagokShell.dll" ThreadingModel="STA" />
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>

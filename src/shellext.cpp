@@ -8,7 +8,9 @@
 //     + 알아서 풀고 압축 파일 지우기 (휴지통으로)
 //  그 밖(파일·폴더·여러 개) → 차곡 ▸ 자료.zip 으로 압축 / (여러 개면) 누른파일.zip 으로 압축 / 자료_20261103.zip 으로 압축
 //                              / (여러 개면) 각각 압축 / 암호 걸어 압축… / ─ / 압축하기… / 분할 압축… / ─ / 차곡으로 열기
+//     + ─ + 백신으로 검사 / ZIP 으로 바꾸기 / 7z 로 바꾸기 (원본은 그대로)
 //  apk·iso 같은 '압축이 목표가 아닌' 형식(formats.h PACKAGE_EXTS) 하나 → 위 압축 메뉴 + ─ + 알아서 풀기 / 풀 위치 선택…
+//  폴더 빈 곳 우클릭(Windows 11 첫 화면) → 새 폴더 (NewFolderCmd)
 //     이름 규칙은 quickname.h (차곡과 함께 씀). 바로 압축 항목은 설정 창 없이 바로 만든다
 #ifndef UNICODE
 #define UNICODE
@@ -31,6 +33,8 @@ static volatile LONG g_refs = 0;
 const CLSID CLSID_ChagokShell = {0x8d0c9dd2, 0x90a8, 0x492a, {0xae, 0xe8, 0x45, 0xaf, 0x3c, 0x6d, 0x4e, 0xfd}};
 // {3BF35A03-70EC-4EEF-9CE7-FE2AD74D76A9} Windows 11 첫 화면 메뉴 (IExplorerCommand)
 const CLSID CLSID_ChagokCommand = {0x3bf35a03, 0x70ec, 0x4eef, {0x9c, 0xe7, 0xfe, 0x2a, 0xd7, 0x4d, 0x76, 0xa9}};
+// {D3F472C5-D1C4-45BB-9B69-8EABEECD599C} Windows 11 첫 화면 메뉴: 폴더 빈 곳 우클릭 → '새 폴더' (Directory\Background)
+const CLSID CLSID_ChagokNewFolder = {0xd3f472c5, 0xd1c4, 0x45bb, {0x9b, 0x69, 0x8e, 0xab, 0xee, 0xcd, 0x59, 0x9c}};
 
 // ------------------------------------------------------------ 메뉴 구성 (테스트에서도 사용)
 bool ChagokIsArchive(const std::wstring& path) {
@@ -52,6 +56,13 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
         m.push_back({L"x-folder", L"파일 이름 폴더에 풀기"});
         m.push_back({L"x-to", L"풀 위치 선택…"});
         m.push_back({L"x-del", L"알아서 풀고 압축 파일 지우기"});
+        m.push_back({L"-4", L""});  // 구분선
+        m.push_back({L"scan", L"백신으로 검사"});
+        bool has7z = GetFileAttributesW((ModuleDir() + L"7z.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
+        std::wstring e = fmt::Ext(paths[0]);
+        if (!fmt::UsesZipEngine(paths[0])) m.push_back({L"conv-zip", L"ZIP 으로 바꾸기"});
+        if (has7z && e != L"7z" && !(e.size() >= 3 && fmt::Digits(e) && fmt::Ext(paths[0].substr(0, paths[0].size() - e.size() - 1)) == L"7z"))
+            m.push_back({L"conv-7z", L"7z 로 바꾸기"});
     } else {
         std::wstring ext = QnExt(ModuleDir()), f = QnFolderStem(paths), n = QnStem(paths[0]);
         m.push_back({L"c-folder", AsName(f + ext)});
@@ -67,6 +78,7 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
             // Windows 11 메뉴는 항목 순서가 고정이라, 압축 항목 아래에 놓을 풀기 항목은 별도 이름(…2)을 쓴다 (실행할 때는 같은 명령)
             m.push_back({L"x-smart2", L"알아서 풀기"});
             m.push_back({L"x-to2", L"풀 위치 선택…"});
+            m.push_back({L"scan2", L"백신으로 검사"});
         }
     }
     m.push_back({L"-2", L""});  // 구분선
@@ -77,7 +89,7 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
 // 차곡 실행. 경로가 많아 명령줄이 길면 목록 파일(@파일)로 넘긴다
 bool ChagokLaunch(const std::wstring& exe, const std::wstring& verbIn, const std::vector<std::wstring>& paths) {
     std::wstring verb = verbIn;
-    if (verb == L"x-smart2" || verb == L"x-to2") verb.pop_back();  // 패키지 메뉴의 풀기 항목
+    if (verb == L"x-smart2" || verb == L"x-to2" || verb == L"scan2") verb.pop_back();  // 패키지 메뉴의 풀기·검사 항목
     std::wstring cmd = L"\"" + exe + L"\"";
     bool openArchive = verb == L"open" && paths.size() == 1 && ChagokIsArchive(paths[0]);
     if (!openArchive) cmd += L" /" + verb;
@@ -284,8 +296,8 @@ static std::vector<std::wstring> ItemPaths(IShellItemArray* arr) {
     return v;
 }
 static HRESULT DupStr(const std::wstring& s, LPWSTR* out) { return SHStrDupW(s.c_str(), out); }
-static const wchar_t* SUB_VERBS[] = {L"x-smart", L"x-here", L"x-folder", L"x-to", L"x-del",
-                                     L"c-folder", L"c-name", L"c-date", L"c-each", L"c-pw", L"-1", L"compress", L"split", L"-3", L"x-smart2", L"x-to2", L"-2", L"open"};
+static const wchar_t* SUB_VERBS[] = {L"x-smart", L"x-here", L"x-folder", L"x-to", L"x-del", L"-4", L"scan", L"conv-zip", L"conv-7z",
+                                     L"c-folder", L"c-name", L"c-date", L"c-each", L"c-pw", L"-1", L"compress", L"split", L"-3", L"x-smart2", L"x-to2", L"scan2", L"-2", L"open"};
 
 class CmdBase : public IExplorerCommand {
 protected:
@@ -325,6 +337,9 @@ public:
         if (v == L"x-del") return L"알아서 풀고 압축 파일 지우기";
         if (v == L"x-smart2") return L"알아서 풀기";
         if (v == L"x-to2") return L"풀 위치 선택…";
+        if (v == L"scan" || v == L"scan2") return L"백신으로 검사";
+        if (v == L"conv-zip") return L"ZIP 으로 바꾸기";
+        if (v == L"conv-7z") return L"7z 로 바꾸기";
         if (v == L"c-folder") return L"폴더 이름으로 압축";
         if (v == L"c-name") return L"파일 이름으로 압축";
         if (v == L"c-date") return L"날짜 붙여 압축";
@@ -402,6 +417,26 @@ public:
     STDMETHODIMP EnumSubCommands(IEnumExplorerCommand** e) override { *e = new SubEnum(); return S_OK; }
 };
 
+// 폴더 빈 곳 우클릭 → '새 폴더': 차곡에 이름을 묻게 하고 만든 뒤 탐색기에서 골라 준다 (Chagok.exe /new-folder 폴더)
+class NewFolderCmd : public CmdBase {
+public:
+    STDMETHODIMP GetTitle(IShellItemArray*, LPWSTR* name) override { return DupStr(L"새 폴더", name); }
+    STDMETHODIMP GetIcon(IShellItemArray*, LPWSTR* icon) override {  // 차곡 아이콘 (설정에서 고른 것)
+        wchar_t dll[MAX_PATH * 2];
+        GetModuleFileNameW(g_inst, dll, MAX_PATH * 2);
+        return DupStr(std::wstring(dll) + L",-" + std::to_wstring(SelectedIconId()), icon);
+    }
+    STDMETHODIMP GetState(IShellItemArray*, BOOL, EXPCMDSTATE* st) override { *st = ECS_ENABLED; return S_OK; }
+    STDMETHODIMP GetFlags(EXPCMDFLAGS* f) override { *f = ECF_DEFAULT; return S_OK; }
+    STDMETHODIMP Invoke(IShellItemArray* arr, IBindCtx*) override {
+        auto paths = ItemPaths(arr);  // 빈 곳 메뉴에서는 지금 폴더 하나
+        if (paths.empty()) return E_INVALIDARG;
+        std::wstring exe = ModuleDir() + L"Chagok.exe";
+        if (!ChagokLaunch(exe, L"new-folder", {paths[0]})) { MessageBoxW(nullptr, (L"차곡을 실행할 수 없습니다.\n" + exe).c_str(), L"차곡", MB_ICONERROR); return E_FAIL; }
+        return S_OK;
+    }
+};
+
 class Factory : public IClassFactory {
     LONG ref = 1;
 public:
@@ -413,9 +448,15 @@ public:
     }
     STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)InterlockedIncrement(&ref); }
     STDMETHODIMP_(ULONG) Release() override { LONG r = InterlockedDecrement(&ref); if (!r) delete this; return (ULONG)r; }
-    bool command = false;
+    bool command = false, newFolder = false;
     STDMETHODIMP CreateInstance(IUnknown* outer, REFIID riid, void** ppv) override {
         if (outer) return CLASS_E_NOAGGREGATION;
+        if (newFolder) {
+            NewFolderCmd* c = new NewFolderCmd();
+            HRESULT hr = c->QueryInterface(riid, ppv);
+            c->Release();
+            return hr;
+        }
         if (command) {
             RootCmd* c = new RootCmd();
             HRESULT hr = c->QueryInterface(riid, ppv);
@@ -431,10 +472,11 @@ public:
 };
 
 extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID clsid, REFIID riid, void** ppv) {
-    bool cmd = IsEqualCLSID(clsid, CLSID_ChagokCommand);
-    if (!cmd && !IsEqualCLSID(clsid, CLSID_ChagokShell)) return CLASS_E_CLASSNOTAVAILABLE;
+    bool cmd = IsEqualCLSID(clsid, CLSID_ChagokCommand), nf = IsEqualCLSID(clsid, CLSID_ChagokNewFolder);
+    if (!cmd && !nf && !IsEqualCLSID(clsid, CLSID_ChagokShell)) return CLASS_E_CLASSNOTAVAILABLE;
     Factory* f = new Factory();
     f->command = cmd;
+    f->newFolder = nf;
     HRESULT hr = f->QueryInterface(riid, ppv);
     f->Release();
     return hr;

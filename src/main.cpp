@@ -659,7 +659,7 @@ static std::wstring SelSummary(int* count = nullptr) {
 }
 
 // ============================================================ 작업(스레드)
-enum JobKind { JK_NONE, JK_COMPRESS, JK_ADD, JK_EXTRACT, JK_TEST, JK_MODIFY, JK_HASH };
+enum JobKind { JK_NONE, JK_COMPRESS, JK_ADD, JK_EXTRACT, JK_TEST, JK_MODIFY, JK_HASH, JK_SCAN };
 struct JobState {
     JobKind kind = JK_NONE;
     Job job;
@@ -680,6 +680,13 @@ struct JobState {
     std::wstring modifyWhat;             // 완료 메시지용 ("이름 바꾸기" / "삭제")
     std::vector<std::wstring> hashFiles; // JK_HASH: 해시를 구할 디스크 파일 (비어 있으면 idx 항목을 임시 폴더에 풀어서)
     std::vector<std::pair<std::wstring, std::wstring>> hashes;  // 결과 (이름, SHA-256)
+    // JK_SCAN: 백신(Windows Defender) 검사. hashFiles 의 파일들을 검사, 끝나면 pending(풀기 작업)을 이어서 시작
+    struct JobState* pending = nullptr;
+    int scanCode = -1;           // 0 위협 없음, 2 위협 발견, 그 밖 검사 못 함
+    std::wstring scanKey;
+    // 형식 바꾸기: 풀기(임시 폴더) → 새 형식으로 압축 → 임시 폴더 지움
+    bool convert = false;
+    std::wstring convExt, convTmp, convPw;
     CRITICAL_SECTION cs;
     JobState() { InitializeCriticalSection(&cs); }
     ~JobState() { DeleteCriticalSection(&cs); }
@@ -737,6 +744,29 @@ static std::wstring TempWorkDir(const wchar_t* tag) {  // %TEMP%\Chagok\<tag>-<�
     return dir;
 }
 
+// Windows Defender 명령줄 검사 도구 (새 플랫폼 폴더의 최신 버전 우선)
+static int VerCmp(const std::wstring& a, const std::wstring& b);
+static std::wstring DefenderExe() {
+    wchar_t pd[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"ProgramData", pd, MAX_PATH);
+    std::wstring base = std::wstring(pd) + L"\\Microsoft\\Windows Defender\\Platform\\", best, bestVer;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((base + L"*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+            std::wstring p = base + fd.cFileName + L"\\MpCmdRun.exe";
+            if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES && (best.empty() || VerCmp(fd.cFileName, bestVer) > 0)) { best = p; bestVer = fd.cFileName; }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (best.empty()) {
+        wchar_t pf[MAX_PATH] = {};
+        ExpandEnvironmentStringsW(L"%ProgramFiles%\\Windows Defender\\MpCmdRun.exe", pf, MAX_PATH);
+        if (GetFileAttributesW(pf) != INVALID_FILE_ATTRIBUTES) best = pf;
+    }
+    return best;
+}
 static DWORD WINAPI JobThread(LPVOID) {
     JobState* j = g_job;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -810,6 +840,36 @@ static DWORD WINAPI JobThread(LPVOID) {
         j->filesTotal = 0;
         j->ok = AnyModify(g_arc, j->rename, j->del, j->job, j->err);
         break;
+    case JK_SCAN: {
+        uint64_t total = 0;
+        for (auto& f : j->hashFiles) { WIN32_FILE_ATTRIBUTE_DATA d; if (GetFileAttributesExW(LongPath(f).c_str(), GetFileExInfoStandard, &d)) total += ((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow; }
+        j->job.total = total ? total : 1; j->job.done = 0;
+        j->filesTotal = (uint32_t)j->hashFiles.size();
+        std::wstring exe = DefenderExe();
+        if (exe.empty()) { j->scanCode = -1; j->err = L"Windows Defender(MpCmdRun.exe)를 찾을 수 없습니다."; j->ok = true; break; }
+        j->scanCode = 0;
+        for (auto& f : j->hashFiles) {
+            EnterCriticalSection(&j->cs); j->cur = FileNameOf(f); LeaveCriticalSection(&j->cs);
+            j->filesDone++;
+            std::wstring cmd = L"\"" + exe + L"\" -Scan -ScanType 3 -File \"" + f + L"\" -DisableRemediation";
+            STARTUPINFOW si{sizeof(si)};
+            PROCESS_INFORMATION pi{};
+            if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) { j->scanCode = -1; j->err = L"Windows Defender 를 실행할 수 없습니다."; break; }
+            while (WaitForSingleObject(pi.hProcess, 200) == WAIT_TIMEOUT)
+                if (j->job.cancel) { TerminateProcess(pi.hProcess, 1); break; }
+            DWORD code = 1;
+            GetExitCodeProcess(pi.hProcess, &code);
+            CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+            if (j->job.cancel) break;
+            WIN32_FILE_ATTRIBUTE_DATA d;
+            if (GetFileAttributesExW(LongPath(f).c_str(), GetFileExInfoStandard, &d)) j->job.done += ((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+            if (code == 2) { j->scanCode = 2; j->firstError = FileNameOf(f); break; }
+            if (code != 0) { j->scanCode = (int)code; wchar_t b[16]; swprintf(b, 16, L"%08X", (unsigned)code); j->err = std::wstring(L"Windows Defender 가 검사하지 못했습니다. (코드 ") + b + L")\n다른 백신을 쓰고 있어 Defender 가 꺼져 있으면 이렇게 나옵니다."; break; }
+        }
+        j->job.done = (uint64_t)j->job.total;
+        j->ok = !j->job.cancel;
+        break;
+    }
     case JK_HASH: {
         std::vector<std::wstring> files = j->hashFiles;
         std::vector<std::wstring> shown;
@@ -855,6 +915,7 @@ static const wchar_t* JobName() {
     case JK_TEST: return L"압축 파일 검사";
     case JK_MODIFY: return g_job->modifyWhat.c_str();
     case JK_HASH: return L"SHA-256 계산";
+    case JK_SCAN: return L"백신 검사";
     default: return L"";
     }
 }
@@ -2963,6 +3024,7 @@ static void ProgPaint(HWND h, HDC dc) {
                        : j->kind == JK_ADD ? L"파일 추가 중…"
                        : j->kind == JK_TEST ? L"압축 파일 검사 중…"
                        : j->kind == JK_HASH ? L"SHA-256 계산 중…"
+                       : j->kind == JK_SCAN ? L"백신으로 검사하는 중…"
                        : j->kind == JK_MODIFY ? j->modifyWhat + L" 중…"
                        : j->sfx ? L"자동 실행 파일 만드는 중…" : (j->split ? L"분할 압축 중…" : L"파일 압축 중…");
     int tx = ib.right + S(16), tr = cr.right - S(24);
@@ -2986,7 +3048,7 @@ static void ProgPaint(HWND h, HDC dc) {
         fd = (uint32_t)min<size_t>(ft, k + 1);
         if (k < j->names.size() && !j->names[k].empty()) cur = j->names[k];
     }
-    if (cur.empty()) cur = j->kind == JK_COMPRESS ? FileNameOf(j->target) : FileNameOf(g_arc.path);
+    if (cur.empty()) cur = j->kind == JK_COMPRESS ? FileNameOf(j->target) : j->kind == JK_SCAN && !j->hashFiles.empty() ? FileNameOf(j->hashFiles[0]) : FileNameOf(g_arc.path);
     Txt(dc, {tx, S(50), tr, S(70)}, cur, P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     if (ft && !j->collecting) {
         int w = TextW(p1, g_fontBold) + S(6);
@@ -3358,12 +3420,6 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         bool preset = false;
         for (int i = 0; i < 6; i++) { bool c = g_splitMB == SPLIT_PRESETS[i]; preset |= c; chip(30 + i, x, y, SPLIT_CHIPS[i], c, true); }
         chip(36, x, y, preset ? std::wstring(L"직접 입력…") : SplitLabel(g_splitMB), !preset, true);
-        y += S(52);
-        head(L"우클릭 메뉴");
-        T({cx, y, cr - S(60), y + S(24)}, L"압축·풀기가 끝나면 탐색기에서 결과 보여 주기", P.text, g_font);
-        toggle(75, cr - S(42), y, RegGet(L"ShowResult", 1) != 0, true);
-        y += S(28);
-        T({cx, y, cr, y + S(36)}, L"새 폴더에 풀었으면 다 푼 뒤 그 폴더를 엽니다. (현재 폴더에 풀면 띄우지 않음)\n바로 압축(자료.zip 으로 압축 등)은 만든 파일을 선택하고, 프리셋 형식으로 만듭니다.", P.dim, g_fontSmall, DT_LEFT | DT_WORDBREAK);
     } else if (s->page == 1) {
         head(L"프리셋");
         int gap = S(12), cw = (cr - cx - 2 * gap) / 3, chh = S(118);
@@ -3467,6 +3523,11 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
             y += S(48);
         }
         head(L"보안");
+        if (!s->compress) {
+            T({cx, y, cr - S(60), y + S(24)}, L"풀기 전에 백신으로 검사 (Windows Defender)", P.text, g_font);
+            toggle(78, cr - S(42), y, RegGet(L"ScanBeforeExtract", 0) != 0, true);
+            y += S(32);
+        }
         T({cx, y, cr, y + S(110)},
           L"· 암호는 AES-256 으로 걸립니다. 암호를 잊으면 누구도 복구할 수 없습니다.\n"
           L"· ZIP 은 파일 이름 목록이 보이고 내용만 잠깁니다. 7z 는 이름까지 숨깁니다.\n"
@@ -3549,6 +3610,7 @@ static void UpdateShortcutIcon(REFKNOWNFOLDERID fid) {
     }
     sl->Release();
 }
+static void UpdateNewFolderIcon(int sel);
 static void SetAppIcon(int sel) {
     if (sel == g_iconSel) return;
     g_iconSel = sel;
@@ -3560,6 +3622,7 @@ static void SetAppIcon(int sel) {
     if (g_set) ApplyIcon(g_set->h);
     if (g_prog.h) ApplyIcon(g_prog.h);
     if (AssocRegistered()) AssocRegister();  // 압축 파일 아이콘도 함께
+    UpdateNewFolderIcon(sel);  // 우클릭 '새 폴더' 아이콘
     UpdateShortcutIcon(FOLDERID_Programs);
     UpdateShortcutIcon(FOLDERID_Desktop);
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
@@ -3612,7 +3675,7 @@ static void SetClick(int id) {
     if (id >= 60 && id <= 62) { g_mode = id - 60; SetApplyTheme(); return; }
     if (id >= 100 && id <= 102) { SetAppIcon(id - 100); SetRefresh(); return; }
     if (id == 72) { RegSet(L"UpdateAuto", RegGet(L"UpdateAuto", 1) ? 0 : 1); SetRefresh(); return; }
-    if (id == 75) { RegSet(L"ShowResult", RegGet(L"ShowResult", 1) ? 0 : 1); SetRefresh(); return; }
+    if (id == 78) { RegSet(L"ScanBeforeExtract", RegGet(L"ScanBeforeExtract", 0) ? 0 : 1); SetRefresh(); return; }
     if (id == 76 || id == 77) { RegSet(L"CpuMode", id == 77 ? 1 : 0); SetRefresh(); return; }
     if (id == 73) {
         DlgSpec d;
@@ -3938,7 +4001,27 @@ static bool QueueAllowed() {  // 압축 파일을 바꾸는 작업이 진행/대
     return true;
 }
 static void StartJobNow(JobState* j);
+static std::wstring g_scannedKey;  // 백신 검사를 마친 압축 파일 (경로|크기|시각) — 한 번 열어 둔 동안 다시 검사하지 않음
+static std::wstring ScanKey(const std::wstring& p) {
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    GetFileAttributesExW(LongPath(p).c_str(), GetFileExInfoStandard, &d);
+    return p + L"|" + std::to_wstring(d.nFileSizeLow) + L"|" + std::to_wstring(d.ftLastWriteTime.dwLowDateTime);
+}
+static JobState* MakeScanJob(const std::vector<std::wstring>& files) {
+    JobState* s = new JobState();
+    s->kind = JK_SCAN;
+    s->hashFiles = files;
+    s->scanKey = files.empty() ? L"" : ScanKey(files[0]);
+    return s;
+}
 static void StartJob(JobState* j) {
+    // 설정 '풀기 전에 백신으로 검사': 이 압축 파일을 아직 검사하지 않았으면 검사부터 (끝나면 풀기를 이어서)
+    if (j->kind == JK_EXTRACT && g_hasArc && RegGet(L"ScanBeforeExtract", 0) && ScanKey(g_arc.path) != g_scannedKey) {
+        JobState* sc = MakeScanJob(g_arc.isSplit && !g_arc.volumes.empty() ? g_arc.volumes : std::vector<std::wstring>{g_arc.path});
+        sc->scanKey = ScanKey(g_arc.path);
+        sc->pending = j;
+        j = sc;
+    }
     if (g_job) {
         g_queue.push_back(j);
         if (g_prog.h) InvalidateRect(g_prog.h, nullptr, FALSE);
@@ -4065,6 +4148,116 @@ static void QuickCompress(const std::vector<std::wstring>& src, int mode) {
     if (mode == QC_DATE) stem += L"_" + QnToday();
     job(src, stem, pw);
     if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+}
+
+// ---- 백신 검사 (Windows Defender)
+static bool NotBusyFor(const wchar_t* what);
+static bool g_menuScan = false;   // 우클릭 '백신으로 검사' 로 실행됨 → 끝나면 종료
+static void CmdScan() {
+    if (!g_hasArc || !NotBusyFor(L"백신 검사")) return;
+    JobState* s = MakeScanJob(g_arc.isSplit && !g_arc.volumes.empty() ? g_arc.volumes : std::vector<std::wstring>{g_arc.path});
+    s->scanKey = ScanKey(g_arc.path);
+    StartJob(s);
+}
+// ---- 형식 바꾸기: 지금 연 압축 파일을 ext(.zip / .7z)로. 원본은 그대로, 같은 폴더에 '이름.zip' (겹치면 (2))
+static bool g_menuConv = false;   // 우클릭 '…으로 바꾸기' 로 실행됨 → 끝나면 종료
+static void StartConvert(const std::wstring& ext) {
+    if (!g_hasArc || !NotBusyFor(L"형식 바꾸기")) return;
+    if (ext == L".7z" && !SzAvailable()) { MsgBox(L"형식 바꾸기", L"7z.dll 이 없어 7z 로 만들 수 없습니다."); return; }
+    std::wstring pw;
+    if (AnyHasPassword(g_arc)) {
+        DlgSpec d;
+        d.title = L"형식 바꾸기";
+        d.msg = L"원본에 암호가 걸려 있습니다.\n새로 만들 " + std::wstring(ext == L".zip" ? L"ZIP" : L"7z") + L" 파일에도 암호를 걸까요?";
+        d.buttons = {L"암호 걸기", L"암호 없이", L"취소"};
+        d.def = 0; d.cancel = 2;
+        int r = RunDialog(g_hwnd, d);
+        if (r == 2 || r < 0) return;
+        if (r == 0 && !AskNewPassword(pw, ext == L".7z")) return;
+    }
+    JobState* j = new JobState();
+    j->kind = JK_EXTRACT;
+    for (size_t i = 0; i < g_arc.entries.size(); i++) j->idx.push_back((int)i);
+    j->dest = TempWorkDir(L"convert");
+    j->convert = true;
+    j->convExt = ext;
+    j->convPw = pw;
+    j->arcPath = g_arc.path;
+    if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+    StartJob(j);
+}
+
+// ---- 안에서 고친 파일 반영: '바로 열기'로 연 파일이 바뀌면 압축 파일에 다시 넣을지 묻는다
+struct EditWatch { std::wstring temp, arc, inner; FILETIME mt{}; uint64_t size = 0; };
+static std::vector<EditWatch> g_edits;
+static bool g_editAsking = false;
+static bool FileStamp(const std::wstring& p, FILETIME& mt, uint64_t& size) {
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(LongPath(p).c_str(), GetFileExInfoStandard, &d)) return false;
+    mt = d.ftLastWriteTime; size = ((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+    return true;
+}
+static void EditWatchAdd(const std::wstring& temp, const std::wstring& inner) {
+    if (!g_hasArc || g_arc.readOnly || AnyHasPassword(g_arc)) return;  // 추가가 안 되는 형식·암호 압축 파일은 반영하지 않음
+    EditWatch w; w.temp = temp; w.arc = g_arc.path; w.inner = inner;
+    if (!FileStamp(temp, w.mt, w.size)) return;
+    for (auto& e : g_edits) if (!lstrcmpiW(e.temp.c_str(), temp.c_str())) { e = w; return; }
+    g_edits.push_back(w);
+}
+static bool EditChanged(EditWatch& w, bool settled) {
+    FILETIME mt; uint64_t size;
+    if (!FileStamp(w.temp, mt, size)) return false;
+    if (CompareFileTime(&mt, &w.mt) == 0 && size == w.size) return false;
+    if (settled) {  // 저장하는 중일 수 있으니 마지막으로 바뀐 지 1.5초 지난 뒤에
+        FILETIME now; GetSystemTimeAsFileTime(&now);
+        ULARGE_INTEGER a{}, b{}; a.LowPart = now.dwLowDateTime; a.HighPart = now.dwHighDateTime; b.LowPart = mt.dwLowDateTime; b.HighPart = mt.dwHighDateTime;
+        if (a.QuadPart < b.QuadPart + 15000000ull) return false;
+    }
+    return true;
+}
+static void EditReflect(EditWatch& w) {
+    std::wstring parent = w.inner.find(L'/') == std::wstring::npos ? L"" : w.inner.substr(0, w.inner.find_last_of(L'/'));
+    JobState* j = new JobState();
+    j->kind = JK_ADD;
+    j->sources = {w.temp};
+    j->prefix = parent.empty() ? L"" : parent + L"/";
+    j->target = parent;
+    j->arcPath = g_arc.path;
+    StartJob(j);
+}
+// 차곡 창이 앞에 있을 때만 묻는다 (다른 프로그램에서 저장하는 중에 끼어들지 않게)
+static void EditWatchTick() {
+    if (g_edits.empty() || g_editAsking || Busy() || !g_hasArc || !IsWindowEnabled(g_hwnd) || GetForegroundWindow() != g_hwnd) return;
+    for (auto& w : g_edits) {
+        if (lstrcmpiW(w.arc.c_str(), g_arc.path.c_str()) || !EditChanged(w, true)) continue;
+        FileStamp(w.temp, w.mt, w.size);
+        g_editAsking = true;
+        DlgSpec d;
+        d.title = L"고친 파일을 압축 파일에 반영할까요?";
+        d.msg = FileNameOf(w.temp) + L" 이(가) 바뀌었습니다.\n\n압축 파일: " + FileNameOf(w.arc);
+        d.buttons = {L"반영", L"반영 안 함"};
+        d.def = 0; d.cancel = 1;
+        int r = RunDialog(g_hwnd, d);
+        g_editAsking = false;
+        if (r == 0) EditReflect(w);
+        return;  // 한 번에 하나씩
+    }
+}
+// 창을 닫을 때: 아직 반영하지 않은 고친 파일이 있으면 묻는다. true 면 반영 작업을 시작함(끝나면 닫힘)
+static bool EditWatchOnClose() {
+    if (!g_hasArc) return false;
+    std::vector<EditWatch*> v;
+    for (auto& w : g_edits) if (!lstrcmpiW(w.arc.c_str(), g_arc.path.c_str()) && EditChanged(w, false)) v.push_back(&w);
+    if (v.empty()) return false;
+    DlgSpec d;
+    d.title = L"고친 파일이 있습니다";
+    d.msg = L"압축 파일에서 열어 고친 파일 " + std::to_wstring(v.size()) + L"개가 아직 반영되지 않았습니다.\n반영하고 닫을까요?";
+    d.buttons = {L"반영하고 닫기", L"그냥 닫기"};
+    d.def = 0; d.cancel = 1;
+    if (RunDialog(g_hwnd, d) != 0) return false;
+    for (auto* w : v) EditReflect(*w);
+    g_edits.clear();
+    return true;
 }
 
 static void CmdCompress(bool split) {
@@ -4222,6 +4415,37 @@ static void CmdNewFolder() {
     if (exists(nn)) { MsgBox(L"새 폴더", L"같은 이름이 이미 있습니다: " + nn); return; }
     NewFolderCreate(nn);
 }
+// 탐색기 폴더 빈 곳 우클릭 '새 폴더': 이름을 묻고 dir 에 폴더를 만든 뒤 탐색기에서 골라 준다
+static void RevealInExplorer(const std::vector<std::wstring>& items);
+static void DiskNewFolder(const std::wstring& dirIn) {
+    std::wstring dir = dirIn;
+    while (dir.size() > 3 && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+    if (!DirExists(dir)) { MsgBox(L"새 폴더", L"폴더를 찾을 수 없습니다.\n" + dir); return; }
+    std::wstring base = dir + (dir.back() == L'\\' ? L"" : L"\\");
+    std::wstring def = L"새 폴더";
+    for (int i = 2; (DirExists(base + def) || FileExists(base + def)) && i < 1000; i++) def = L"새 폴더 (" + std::to_wstring(i) + L")";
+    for (;;) {
+        DlgSpec d;
+        d.title = L"새 폴더";
+        d.msg = L"만들 폴더 이름을 입력하세요.\n위치: " + dir;
+        d.buttons = {L"만들기", L"취소"};
+        d.def = 0; d.cancel = 1;
+        d.input = true; d.text = true;
+        d.inputText = def;
+        if (RunDialog(g_hwnd, d) != 0) return;
+        std::wstring nn = d.inputText;
+        while (!nn.empty() && (nn.back() == L' ' || nn.back() == L'.')) nn.pop_back();
+        while (!nn.empty() && nn[0] == L' ') nn.erase(0, 1);
+        if (nn.empty()) return;
+        def = nn;
+        if (nn.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) { MsgBox(L"새 폴더", L"이름에 \\ / : * ? \" < > | 는 쓸 수 없습니다."); continue; }
+        if (DirExists(base + nn) || FileExists(base + nn)) { MsgBox(L"새 폴더", L"같은 이름이 이미 있습니다: " + nn); continue; }
+        if (!CreateDirectoryW(LongPath(base + nn).c_str(), nullptr)) { MsgBox(L"새 폴더", L"폴더를 만들 수 없습니다. (권한이나 이름을 확인하세요)\n" + base + nn); continue; }
+        AllowSetForegroundWindow(ASFW_ANY);
+        RevealInExplorer({base + nn});
+        return;
+    }
+}
 static void CmdAdd() {
     if (g_arc.readOnly) { MsgBox(L"파일 추가 불가", g_arc.readOnlyWhy); return; }
     if (Busy()) { MsgBox(L"파일 추가", L"진행 중인 작업이 끝난 뒤에 할 수 있습니다."); return; }
@@ -4259,12 +4483,18 @@ static std::wstring RegReadStr(const std::wstring& key, const wchar_t* name) {
 static const wchar_t* HANDLER_KEY = L"Software\\Classes\\AllFilesystemObjects\\shellex\\ContextMenuHandlers\\Chagok";
 static const wchar_t* CLSID_KEY = L"Software\\Classes\\CLSID\\" CHAGOK_CLSID;
 static std::wstring ShellDllPath() { return ParentOf(ExePath()) + L"\\ChagokShell.dll"; }
+// 폴더 빈 곳 우클릭 → '새 폴더' (예전 방식 메뉴용 정적 명령, 맨 위. Windows 11 첫 화면은 패키지의 NewFolderCmd)
+static const wchar_t* NEWFOLDER_KEY = L"Software\\Classes\\Directory\\Background\\shell\\ChagokNewFolder";
 static bool ShellRegistered() {
     return !RegReadStr(HANDLER_KEY, L"").empty();
+}
+static void UpdateNewFolderIcon(int sel) {
+    if (!RegReadStr(NEWFOLDER_KEY, L"").empty()) RegStr(NEWFOLDER_KEY, L"Icon", ShellDllPath() + L",-" + std::to_wstring(IconResId(sel)));
 }
 static void ShellUnregister() {
     RegDeleteTreeW(HKEY_CURRENT_USER, HANDLER_KEY);
     RegDeleteTreeW(HKEY_CURRENT_USER, CLSID_KEY);
+    RegDeleteTreeW(HKEY_CURRENT_USER, NEWFOLDER_KEY);
     // 이전 버전(정적 메뉴: ChagokCompress/ChagokExtract, 그 전 이름 Zipper*) 정리
     for (auto r : SHELL_ROOTS) {
         std::wstring o = r;
@@ -4281,6 +4511,10 @@ static bool ShellRegister() {
     RegStr(std::wstring(CLSID_KEY) + L"\\InprocServer32", L"", ShellDllPath());
     RegStr(std::wstring(CLSID_KEY) + L"\\InprocServer32", L"ThreadingModel", L"Apartment");
     RegStr(HANDLER_KEY, L"", CHAGOK_CLSID);
+    RegStr(NEWFOLDER_KEY, L"", L"새 폴더");
+    RegStr(NEWFOLDER_KEY, L"Icon", ShellDllPath() + L",-" + std::to_wstring(IconResId(g_iconSel)));  // 차곡 아이콘 (설정에서 고른 것)
+    RegStr(NEWFOLDER_KEY, L"Position", L"Top");
+    RegStr(std::wstring(NEWFOLDER_KEY) + L"\\command", L"", L"\"" + ExePath() + L"\" /new-folder \"%V\"");
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return true;
 }
@@ -4303,7 +4537,49 @@ static const wchar_t* CAPS_KEY = L"Software\\Sinsul\\ChagokApp\\Capabilities";
 static bool AssocRegistered() {
     return !RegReadStr(L"Software\\RegisteredApplications", L"Chagok").empty();
 }
+// ---- 탐색기 미리 보기 창 (ChagokPreview.dll, IPreviewHandler). 압축 형식 확장자마다 연결
+#define PREVIEW_CLSID L"{6A1C2D0E-5B7F-4C3A-9E21-8F4D2B7A1C55}"
+#define PREVIEW_IID L"{8895B1C6-B41F-4C1C-A562-0D564250836F}"
+static std::wstring PreviewDllPath() { return ParentOf(ExePath()) + L"\\ChagokPreview.dll"; }
+static std::vector<std::wstring> PreviewExts() {
+    std::vector<std::wstring> v;
+    for (auto e : fmt::ZIP_EXTS) v.push_back(std::wstring(L".") + e);
+    for (auto e : fmt::SZ_EXTS) v.push_back(std::wstring(L".") + e);
+    v.push_back(L".z01");
+    return v;
+}
+static void PreviewUnregister() {
+    for (auto& e : PreviewExts())
+        for (const wchar_t* root : {L"Software\\Classes\\", L"Software\\Classes\\SystemFileAssociations\\"}) {
+            std::wstring k = std::wstring(root) + e + L"\\ShellEx\\" PREVIEW_IID;
+            if (!lstrcmpiW(RegReadStr(k, L"").c_str(), PREVIEW_CLSID)) RegDeleteTreeW(HKEY_CURRENT_USER, k.c_str());
+        }
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\" PREVIEW_CLSID);
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers", 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS) {
+        RegDeleteValueW(k, PREVIEW_CLSID);
+        RegCloseKey(k);
+    }
+}
+static void PreviewRegister() {
+    if (!FileExists(PreviewDllPath())) return;
+    std::wstring ck = L"Software\\Classes\\CLSID\\" PREVIEW_CLSID;
+    RegStr(ck, L"", L"차곡 미리 보기");
+    RegStr(ck, L"DisplayName", L"차곡 미리 보기");
+    RegStr(ck, L"AppID", L"{6d2b5079-2f0b-48dd-ab7f-97cec514d30b}");  // Windows 미리 보기 호스트(prevhost.exe, 64비트)
+    RegStr(ck + L"\\InprocServer32", L"", PreviewDllPath());
+    RegStr(ck + L"\\InprocServer32", L"ThreadingModel", L"Apartment");
+    RegStr(L"Software\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers", PREVIEW_CLSID, L"차곡 미리 보기");
+    for (auto& e : PreviewExts()) {
+        RegStr(std::wstring(L"Software\\Classes\\") + e + L"\\ShellEx\\" PREVIEW_IID, L"", PREVIEW_CLSID);
+        RegStr(std::wstring(L"Software\\Classes\\SystemFileAssociations\\") + e + L"\\ShellEx\\" PREVIEW_IID, L"", PREVIEW_CLSID);
+    }
+}
+static bool PreviewRegistered() {
+    return !lstrcmpiW(RegReadStr(L"Software\\Classes\\CLSID\\" PREVIEW_CLSID L"\\InprocServer32", L"").c_str(), PreviewDllPath().c_str());
+}
 static void AssocUnregister() {
+    PreviewUnregister();
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\Chagok.zip");
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\Chagok.archive");
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\Chagok.exe");
@@ -4349,6 +4625,7 @@ static void AssocRegister() {
     RegStr(CAPS_KEY, L"ApplicationDescription", L"압축 · 분할 압축 · 압축 해제");
     RegStr(CAPS_KEY, L"ApplicationIcon", exe + L"," + std::to_wstring(IconIndex(g_iconSel)));
     RegStr(L"Software\\RegisteredApplications", L"Chagok", CAPS_KEY);
+    PreviewRegister();
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 }
 static void OpenDefaultAppsSettings() {
@@ -4371,7 +4648,11 @@ static void CmdSetDefault() {
 }
 
 // exe 를 옮긴 경우 등록된 경로를 자동으로 갱신
+static void PreviewRegister();
+static bool PreviewRegistered();
+static std::wstring PreviewDllPath();
 static void ShellRefreshPath() {
+    if (FileExists(PreviewDllPath()) && !PreviewRegistered()) PreviewRegister();  // 1.20 미리 보기 (설치 위치가 바뀌어도 갱신)
     if (AssocRegistered()) {
         std::wstring cmd = RegReadStr(std::wstring(L"Software\\Classes\\") + PROGID + L"\\shell\\open\\command", L"");
         if (cmd.find(ExePath()) == std::wstring::npos) AssocRegister();
@@ -4383,6 +4664,8 @@ static void ShellRefreshPath() {
     if (legacy) { ShellRegister(); return; }
     if (!ShellRegistered()) return;
     if (lstrcmpiW(RegReadStr(std::wstring(CLSID_KEY) + L"\\InprocServer32", L"").c_str(), ShellDllPath().c_str()) != 0) ShellRegister();
+    else if (RegReadStr(std::wstring(NEWFOLDER_KEY) + L"\\command", L"").find(ExePath()) == std::wstring::npos ||
+             RegReadStr(NEWFOLDER_KEY, L"Icon").find(L"ChagokShell.dll") == std::wstring::npos) ShellRegister();  // 1.19 '새 폴더' 추가, 1.19.1 아이콘
 }
 
 static void SetThemeMode(int theme, int mode) {
@@ -5257,6 +5540,9 @@ static void CmdContextMenu(POINT screen) {
     }
     v.push_back({710, L"압축 파일 검사", 0, false, true});
     v.push_back({711, L"압축 파일 SHA-256", 0, false, true});
+    v.push_back({713, L"백신으로 검사", 0, false, true});
+    if (!g_arc.isZip) v.push_back({714, L"ZIP 으로 바꾸기", 0, false, true});
+    if (lstrcmpiW(g_arc.format.c_str(), L"7z") && SzAvailable()) v.push_back({715, L"7z 로 바꾸기", 0, false, true});
     if (g_arc.isZip) v.push_back({712, L"이름 글자 코드…", 0, false, true});
     v.push_back({0, L"", 1, false, true});
     v.push_back({725, L"정렬…", 0, false, true});
@@ -5273,6 +5559,9 @@ static void CmdContextMenu(POINT screen) {
     case 705: CmdDelete(); break;
     case 706: CmdHash(false); break;
     case 710: CmdTest(); break;
+    case 713: CmdScan(); break;
+    case 714: StartConvert(L".zip"); break;
+    case 715: StartConvert(L".7z"); break;
     case 711: CmdHash(true); break;
     case 712: CmdNameCodepage(a); break;
     case 720: case 721: case 722: case 723: case 724: ApplySort(id); break;
@@ -5395,11 +5684,6 @@ static void RevealInExplorer(const std::vector<std::wstring>& items) {
     for (auto a : abs) ILFree(a);
     ILFree(folder);
 }
-// 우클릭으로 푼 결과 보여 주기: 새 폴더에 풀었을 때만 그 폴더를 연다 (현재 폴더에 바로 풀었으면 이미 보고 있으므로 아무것도 안 띄움)
-static void RevealExtracted(const std::wstring& dest, const std::wstring& arcParent) {
-    if (!lstrcmpiW(FsNorm(dest).c_str(), FsNorm(arcParent).c_str())) return;
-    OpenFolderNow(dest);
-}
 // 압축 파일(분할이면 조각 전부)을 휴지통으로
 static bool RecycleArchive() {
     std::vector<std::wstring> files = g_arc.isSplit && !g_arc.volumes.empty() ? g_arc.volumes : std::vector<std::wstring>{g_arc.path};
@@ -5422,16 +5706,6 @@ static void OnJobDone() {
     if (g_queue.empty()) ApplyCpuMode(false);  // 작업이 모두 끝나면 우선순위를 되돌린다
     HWND fg = GetForegroundWindow();
     bool away = g_progHidden || (fg != g_hwnd && fg != g_prog.h) || IsIconic(g_hwnd);  // 사용자가 다른 일을 하는 중
-    // 우클릭 작업의 결과 폴더는 진행 창을 닫기 '전에' 연다.
-    // 진행 창을 먼저 닫으면 Windows 가 앞 창(압축 파일이 있던 탐색기 창)을 다시 앞으로 올리고, 차곡은 앞으로 올릴 권한을 잃어
-    // 새로 연 폴더 창이 그 뒤에 숨는다 (큰 파일처럼 진행 창이 떠 있던 경우).
-    {
-        JobState* d = g_job;
-        bool ok = d && d->ok && !d->failed && !d->job.cancel && RegGet(L"ShowResult", 1);
-        AllowSetForegroundWindow(ASFW_ANY);
-        if (ok && d->kind == JK_EXTRACT && g_menuLaunch && g_quietDone)
-            RevealExtracted(d->dest, ParentOf(g_arc.path));
-    }
     ProgClose();
     JobState* j = g_job;
     g_job = nullptr;
@@ -5442,6 +5716,66 @@ static void OnJobDone() {
     // 다음 작업부터 시작해 두고 결과를 보여 준다
     if (more) { JobState* n = g_queue.front(); g_queue.erase(g_queue.begin()); StartJobNow(n); }
     Relayout();
+    if (j->kind == JK_EXTRACT && j->convert) {  // 형식 바꾸기 1단계(풀기) 끝 → 새 형식으로 압축
+        if (j->ok && !j->failed && !cancelled) {
+            std::vector<std::wstring> src;
+            WIN32_FIND_DATAW fd;
+            HANDLE fh = FindFirstFileW(LongPath(j->dest + L"\\*").c_str(), &fd);
+            if (fh != INVALID_HANDLE_VALUE) {
+                do { if (wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..")) src.push_back(j->dest + L"\\" + fd.cFileName); } while (FindNextFileW(fh, &fd));
+                FindClose(fh);
+            }
+            JobState* c = new JobState();
+            c->kind = JK_COMPRESS;
+            c->sources = src;
+            c->target = UniqueFile(ParentOf(j->arcPath) + L"\\" + fmt::Stem(j->arcPath), j->convExt);
+            c->password = j->convPw;
+            c->convert = true;
+            c->convTmp = j->dest;
+            StartJob(c);
+        } else {
+            if (!cancelled) MsgBox(L"형식 바꾸기 실패", j->failed ? std::to_wstring(j->failed) + L"개 항목을 풀지 못해 바꾸지 않았습니다.\n" + j->firstError : j->err);
+            DeleteTree(j->dest);
+        }
+        if (!j->convPw.empty()) SecureZeroMemory(&j->convPw[0], j->convPw.size() * sizeof(wchar_t));
+        delete j;
+        if (g_menuConv && !Busy()) DestroyWindow(g_hwnd);
+        return;
+    }
+    if (j->kind == JK_COMPRESS && j->convert) {  // 형식 바꾸기 2단계 끝
+        DeleteTree(j->convTmp);
+        if (j->ok) { if (!g_menuConv) MsgBox(L"형식 바꾸기 완료", L"새로 만들었습니다. 원본은 그대로 있습니다.\n" + j->target); }
+        else if (!cancelled) MsgBox(L"형식 바꾸기 실패", j->err);
+        delete j;
+        if (g_menuConv && !Busy()) DestroyWindow(g_hwnd);
+        return;
+    }
+    if (j->kind == JK_SCAN) {
+        JobState* next = j->pending;
+        j->pending = nullptr;
+        std::wstring what = j->hashFiles.empty() ? L"" : FileNameOf(j->hashFiles[0]);
+        if (cancelled) { delete next; next = nullptr; }
+        else if (j->scanCode == 0) {
+            g_scannedKey = j->scanKey;
+            if (!next) MsgBox(L"백신 검사: 위협 없음", what + L"\n\nWindows Defender 로 검사했습니다. 발견된 위협이 없습니다.");
+        } else if (j->scanCode == 2) {
+            MsgBox(L"백신 검사: 위협 발견", what + L"\n\nWindows Defender 가 위협을 발견했습니다." + (next ? L" 압축을 풀지 않았습니다." : L"") +
+                                         L"\nWindows 보안 → 바이러스 및 위협 방지에서 처리하세요.");
+            delete next; next = nullptr;
+        } else if (next) {
+            DlgSpec d;
+            d.title = L"백신 검사를 할 수 없습니다";
+            d.msg = j->err + L"\n\n검사하지 않고 풀까요?";
+            d.buttons = {L"그냥 풀기", L"취소"};
+            d.def = 1; d.cancel = 1;
+            if (RunDialog(g_hwnd, d) == 0) g_scannedKey = j->scanKey;
+            else { delete next; next = nullptr; }
+        } else MsgBox(L"백신 검사를 할 수 없습니다", j->err);
+        delete j;
+        if (next) StartJob(next);
+        if ((g_menuLaunch || g_menuScan || g_menuConv) && !Busy()) DestroyWindow(g_hwnd);
+        return;
+    }
     if (j->kind == JK_COMPRESS && g_quick) {  // 우클릭 바로 압축: 창 없이 끝낸다
         if (j->ok) g_quickMade.push_back(FileExists(j->target) || !FileExists(j->target + L".001") ? j->target : j->target + L".001");
         else if (!cancelled) MsgBox(L"압축 실패", FileNameOf(j->target) + L"\n" + j->err);
@@ -5453,7 +5787,6 @@ static void OnJobDone() {
         if (!j->reopenPw.empty()) SecureZeroMemory(&j->reopenPw[0], j->reopenPw.size() * sizeof(wchar_t));
         delete j;
         if (!Busy()) {
-            if (!g_quickMade.empty() && RegGet(L"ShowResult", 1)) RevealInExplorer(g_quickMade);
             DestroyWindow(g_hwnd);
         }
         return;
@@ -5518,6 +5851,7 @@ static void OnJobDone() {
     } else if (j->kind == JK_EXTRACT) {
         if (!j->ok && !cancelled) MsgBox(L"압축 해제 실패", j->err);
         else if (j->ok && !j->openAfter.empty()) {
+            if (j->idx.size() == 1 && (size_t)j->idx[0] < g_arc.entries.size()) EditWatchAdd(j->openAfter, g_arc.entries[(size_t)j->idx[0]].name);  // 고치면 반영할지 묻기
             if ((INT_PTR)ShellExecuteW(g_hwnd, L"open", j->openAfter.c_str(), nullptr, ParentOf(j->openAfter).c_str(), SW_SHOWNORMAL) <= 32)
                 ShellExecuteW(g_hwnd, L"open", L"rundll32.exe", (L"shell32.dll,OpenAs_RunDLL " + j->openAfter).c_str(), nullptr, SW_SHOWNORMAL);
             delete j;
@@ -5943,7 +6277,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
     case WM_TIMER:
         if (w == 78) { KillTimer(h, 78); if (g_hoverId == ID_THEME && IsWindowEnabled(h) && GetForegroundWindow() == h) AlbumOpen(); return 0; }
         if (w == 79) { AlbumTick(); return 0; }
-        if (w == 77) UpdAfterJob();  // 미뤄 둔 업데이트 질문 (작업·다른 창이 끝나면)
+        if (w == 77) { UpdAfterJob(); EditWatchTick(); }  // 미뤄 둔 업데이트 질문 (작업·다른 창이 끝나면)
         if (w == 77 && g_fs && g_fsWatch != INVALID_HANDLE_VALUE && WaitForSingleObject(g_fsWatch, 0) == WAIT_OBJECT_0) {
             static ULONGLONG last = 0;  // 큰 파일을 쓰는 중이면 알림이 계속 오므로 1.5초에 한 번만
             if (GetTickCount64() - last >= 1500 && !g_dragging && GetCapture() != h) {
@@ -6217,6 +6551,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
             if (RunDialog(h, d) == 0 && g_job) { g_quitAfterJob = true; g_job->job.cancel = true; }
             return 0;
         }
+        if (EditWatchOnClose()) { g_quitAfterJob = true; return 0; }  // 반영이 끝나면 닫힘
         DestroyWindow(h);
         return 0;
     case WM_DESTROY: TrayRemove(); PostQuitMessage(0); return 0;
@@ -6393,12 +6728,21 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     ApplyOpacity(hw);
     // 우클릭 메뉴의 압축/풀기는 메인 창 없이 설정 창·진행 창만 띄운다
     int quick = verb == L"c-folder" ? QC_FOLDER : verb == L"c-name" ? QC_NAME : verb == L"c-date" ? QC_DATE : verb == L"c-each" ? QC_EACH : verb == L"c-pw" ? QC_PW : QC_NONE;
-    bool menuJob = verb == L"compress" || verb == L"split" || verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del" || quick;
+    bool menuJob = verb == L"scan" || verb == L"conv-zip" || verb == L"conv-7z" || verb == L"new-folder" || verb == L"compress" || verb == L"split" || verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del" || quick;
     g_mainHidden = menuJob;
     if (!menuJob) { ShowWindow(hw, show); UpdateWindow(hw); }
     ShellRefreshPath();
     CleanTemp();
-    if (quick) {
+    if (verb == L"scan" || verb == L"conv-zip" || verb == L"conv-7z") {  // 우클릭: 백신으로 검사 / 형식 바꾸기
+        (verb == L"scan" ? g_menuScan : g_menuConv) = true;
+        if (verb == L"scan") {
+            if (!paths.empty()) { JobState* sc = MakeScanJob({paths[0]}); StartJob(sc); }
+        } else if (!paths.empty() && OpenArchive(paths[0])) StartConvert(verb == L"conv-zip" ? L".zip" : L".7z");
+        if (IsWindow(hw) && !Busy()) DestroyWindow(hw);
+    } else if (verb == L"new-folder") {  // 탐색기 폴더 빈 곳 우클릭 → 새 폴더
+        if (!paths.empty()) DiskNewFolder(paths[0]);
+        DestroyWindow(hw);
+    } else if (quick) {
         g_quick = quick;
         if (!paths.empty()) QuickCompress(paths, quick);
         if (IsWindow(hw) && !Busy()) DestroyWindow(hw);  // 암호 창에서 취소

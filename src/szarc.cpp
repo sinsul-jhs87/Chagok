@@ -21,9 +21,12 @@ static bool g_7zTried = false;
 static Func_CreateObject g_create = nullptr;
 static std::vector<SzFormat> g_formats;
 
+// 7z.dll 을 찾을 폴더: 이 코드가 든 모듈(Chagok.exe 또는 ChagokPreview.dll)이 있는 폴더
 static std::wstring ExeDir() {
     wchar_t b[MAX_PATH * 2];
-    GetModuleFileNameW(nullptr, b, MAX_PATH * 2);
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&ExeDir, &self);
+    GetModuleFileNameW(self, b, MAX_PATH * 2);
     std::wstring s = b;
     return s.substr(0, s.find_last_of(L'\\'));
 }

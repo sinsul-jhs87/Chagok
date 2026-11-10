@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "LogicLib.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.18.0"
+  !define VERSION "1.20.0"
 !endif
 !define APPNAME   "차곡"
 !define APPID     "Chagok"
@@ -92,7 +92,16 @@ FunctionEnd
 ; 탐색기가 물고 있는(로드한) 메뉴 DLL 은 지울 수 없으므로 임시 폴더로 옮겨 둔다(같은 드라이브면 이동 가능).
 !macro MOVE_LOCKED_DLL_FN PFX
 Function ${PFX}MoveLockedDll
+  ; 탐색기 미리 보기 창이 ChagokPreview.dll·7z.dll 을 쥐고 있으면 미리 보기 호스트를 닫는다 (미리 보기 창은 다시 열면 됨)
+  nsExec::Exec `"$SYSDIR\taskkill.exe" /f /im prevhost.exe`
+  Pop $0
   Delete "$TEMP\ChagokShell-old-*.dll"
+  Delete "$TEMP\ChagokPreview-old-*.dll"
+  IfFileExists "$INSTDIR\ChagokPreview.dll" 0 +5
+    Delete "$INSTDIR\ChagokPreview.dll"
+    IfFileExists "$INSTDIR\ChagokPreview.dll" 0 +3
+    System::Call 'kernel32::GetTickCount()i.r0'
+    Rename "$INSTDIR\ChagokPreview.dll" "$TEMP\ChagokPreview-old-$0.dll"
   IfFileExists "$INSTDIR\ChagokShell.dll" 0 done
   Delete "$INSTDIR\ChagokShell.dll"
   IfFileExists "$INSTDIR\ChagokShell.dll" 0 done
@@ -200,6 +209,7 @@ Section "${APPNAME} 프로그램 (필수)" SecMain
   Call MoveLockedDll
   File "..\build\${EXE}"
   File "..\build\ChagokShell.dll"
+  File "..\build\ChagokPreview.dll"
   File "..\build\7z.dll"
   File "..\build\ChagokSFX.bin"
   File "..\build\7-Zip_License.txt"
@@ -316,6 +326,7 @@ Section "Uninstall"
   Delete "$INSTDIR\${EXE}"
   Call un.MoveLockedDll
   Delete "$INSTDIR\7z.dll"
+  Delete "$INSTDIR\ChagokPreview.dll"
   Delete "$INSTDIR\ChagokSFX.bin"
   Delete "$INSTDIR\7-Zip_License.txt"
   Delete "$INSTDIR\README.md"

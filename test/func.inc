@@ -37,10 +37,34 @@ static void NfTest(const std::wstring& arc) {
     int one = SingleSel();
     Check(one >= 0 && g_rows[(size_t)one].kind == 1 && g_dirs[(size_t)g_rows[(size_t)one].idx].name == L"새 폴더", L"만든 폴더가 선택됨");
 }
+// 고친 파일 반영: EW_ARC 의 a.txt 를 임시 폴더에 풀어 고친 뒤 반영 → 압축 파일 안 크기가 바뀌는지
+static void EwTest(const std::wstring& arc) {
+    Check(OpenArchive(arc), L"압축 파일 열기");
+    int idx = -1;
+    for (size_t i = 0; i < g_arc.entries.size(); i++) if (FileNameOf(g_arc.entries[i].name) == L"a.txt") idx = (int)i;
+    Check(idx >= 0, L"a.txt 찾기");
+    std::wstring dir = TempWorkDir(L"ewtest"), err;
+    std::wstring inner = g_arc.entries[(size_t)idx].name;
+    Check(ExtractNow({idx}, inner.find(L'/') == std::wstring::npos ? L"" : inner.substr(0, inner.find_last_of(L'/') + 1), dir, err), L"임시 폴더에 풀기");
+    std::wstring tmp = dir + L"\\a.txt";
+    EditWatchAdd(tmp, inner);
+    Check(g_edits.size() == 1 && !EditChanged(g_edits[0], false), L"감시 시작");
+    Sleep(1100);
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    DWORD w; WriteFile(h, "changed text 12345", 18, &w, nullptr); CloseHandle(h);
+    Check(EditChanged(g_edits[0], false), L"바뀐 것 알아채기");
+    EditReflect(g_edits[0]);
+    for (int i = 0; i < 300 && Busy(); i++) Pump(100);
+    Pump(500);
+    uint64_t sz = 0;
+    for (auto& e : g_arc.entries) if (e.name == inner) sz = e.usize;
+    Check(sz == 18 && g_arc.entries.size() >= 1, L"압축 파일에 반영됨 (크기 18)");
+}
 static void FuncRun() {
     std::wstring dir = EnvW(L"SHOT_BROWSE");
     g_flog = _wfopen(EnvW(L"FUNC_LOG").c_str(), L"w, ccs=UTF-8");
     if (!EnvW(L"UPD_GH").empty()) { UpdTest(); fclose(g_flog); DestroyWindow(g_hwnd); return; }
+    if (!EnvW(L"EW_ARC").empty()) { EwTest(EnvW(L"EW_ARC")); fclose(g_flog); DestroyWindow(g_hwnd); return; }
     if (!EnvW(L"NF_ARC").empty()) { NfTest(EnvW(L"NF_ARC")); fclose(g_flog); DestroyWindow(g_hwnd); return; }
     Pump(500);
     EnterBrowse(dir);

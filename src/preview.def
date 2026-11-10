@@ -1,0 +1,4 @@
+LIBRARY ChagokPreview
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
