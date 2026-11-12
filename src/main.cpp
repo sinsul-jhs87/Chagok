@@ -7,6 +7,7 @@
 #include <shobjidl.h>
 #include <shlwapi.h>
 #include <bcrypt.h>
+#include <wincrypt.h>
 #include <dwmapi.h>
 #include <wininet.h>
 #include <wintrust.h>
@@ -687,16 +688,83 @@ struct JobState {
     // 형식 바꾸기: 풀기(임시 폴더) → 새 형식으로 압축 → 임시 폴더 지움
     bool convert = false;
     std::wstring convExt, convTmp, convPw;
+    int levelFixed = 0;          // 0 이 아니면 설정의 프리셋 대신 이 압축 수준 (우클릭 바로 압축)
+    bool delSrc = false;         // 압축 후 원본 지우기: 만든 파일을 검사해 이상 없을 때만 원본을 휴지통으로
+    bool srcVerified = false;    // 검사 통과
     CRITICAL_SECTION cs;
     JobState() { InitializeCriticalSection(&cs); }
     ~JobState() { DeleteCriticalSection(&cs); }
 };
+// ============================================================ 자주 쓰는 암호
+// 설정 → 보안 및 기타 → 자주 쓰는 암호, 또는 암호 창의 '저장하고 확인'. 풀 때 먼저 맞춰 보고 맞으면 묻지 않는다.
+// Windows 데이터 보호(DPAPI)로 암호화해 레지스트리에 둔다 → 이 PC 의 이 Windows 사용자만 풀 수 있음
+static const wchar_t* PW_KEY = L"Software\\Sinsul\\Chagok";
+static const wchar_t* PW_VALUE = L"SavedPasswords";
+static void PwWipe(std::vector<std::wstring>& v) {
+    for (auto& p : v) if (!p.empty()) SecureZeroMemory(&p[0], p.size() * sizeof(wchar_t));
+    v.clear();
+}
+static std::vector<std::wstring> PwLoad() {
+    std::vector<std::wstring> v;
+    DWORD sz = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, PW_KEY, PW_VALUE, RRF_RT_REG_BINARY, nullptr, nullptr, &sz) != ERROR_SUCCESS || !sz) return v;
+    std::vector<BYTE> b(sz);
+    if (RegGetValueW(HKEY_CURRENT_USER, PW_KEY, PW_VALUE, RRF_RT_REG_BINARY, nullptr, b.data(), &sz) != ERROR_SUCCESS) return v;
+    DATA_BLOB in{sz, b.data()}, out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return v;
+    const wchar_t* w = (const wchar_t*)out.pbData;
+    std::wstring cur;
+    for (size_t i = 0; i < out.cbData / sizeof(wchar_t); i++) {
+        if (w[i]) { cur += w[i]; continue; }
+        if (!cur.empty()) v.push_back(cur);
+        SecureZeroMemory(&cur[0], cur.size() * sizeof(wchar_t));
+        cur.clear();
+    }
+    SecureZeroMemory(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return v;
+}
+static void PwStore(const std::vector<std::wstring>& v) {
+    if (v.empty()) { RegDeleteKeyValueW(HKEY_CURRENT_USER, PW_KEY, PW_VALUE); return; }
+    std::wstring all;
+    for (auto& p : v) { all += p; all += L'\0'; }
+    DATA_BLOB in{(DWORD)(all.size() * sizeof(wchar_t)), (BYTE*)&all[0]}, out{};
+    if (CryptProtectData(&in, L"Chagok", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+        RegSetKeyValueW(HKEY_CURRENT_USER, PW_KEY, PW_VALUE, REG_BINARY, out.pbData, out.cbData);
+        LocalFree(out.pbData);
+    }
+    SecureZeroMemory(&all[0], all.size() * sizeof(wchar_t));
+}
+static bool PwAdd(const std::wstring& pw) {  // 이미 있으면 false
+    if (pw.empty()) return false;
+    std::vector<std::wstring> v = PwLoad();
+    bool has = std::find(v.begin(), v.end(), pw) != v.end();
+    if (!has) { v.insert(v.begin(), pw); PwStore(v); }
+    PwWipe(v);
+    return !has;
+}
+static int PwCount() { std::vector<std::wstring> v = PwLoad(); int n = (int)v.size(); PwWipe(v); return n; }
+static void PwTrySaved(AnyArchive& a) {
+    if (!AnyHasPassword(a)) return;
+    std::vector<std::wstring> v = PwLoad();
+    if (!v.empty()) AnyTryPasswords(a, v);
+    PwWipe(v);
+}
+static std::wstring g_pwToSave;  // 암호 창에서 '저장하고 확인'을 누른 암호: 맞는 것으로 확인되면 저장
+static void PwCommitPending(bool ok) {
+    if (g_pwToSave.empty()) return;
+    if (ok) PwAdd(g_pwToSave);
+    SecureZeroMemory(&g_pwToSave[0], g_pwToSave.size() * sizeof(wchar_t));
+    g_pwToSave.clear();
+}
+
 static JobState* g_job = nullptr;
 static std::vector<JobState*> g_queue;  // 대기 중인 작업 (앞에서부터 실행)
 static HANDLE g_jobThread = nullptr;
 static bool g_quitAfterJob = false;
 static bool g_menuCompress = false;  // 우클릭 '압축'으로 실행됨
-enum { QC_NONE, QC_FOLDER, QC_NAME, QC_DATE, QC_EACH, QC_PW };
+enum { QC_NONE, QC_FOLDER, QC_NAME, QC_DATE, QC_EACH, QC_PW, QC_ZIP, QC_7Z, QC_7ZMAX, QC_ZIPMAX, QC_SPLIT };
+static uint64_t g_quickSplitMB = 0;  // 우클릭 '분할 압축 ▸ 100MB 씩' 등
 static int g_quick = QC_NONE;        // 우클릭 '바로 압축'으로 실행됨: 창 없이 만들고 끝나면 종료
 static std::vector<std::wstring> g_quickMade;  // 바로 압축으로 만든 파일 (끝나면 탐색기에서 보여 줌)
 static bool g_menuDel = false;       // 우클릭 '알아서 풀고 압축 파일 지우기'
@@ -778,6 +846,8 @@ static DWORD WINAPI JobThread(LPVOID) {
     j->job.askOverwrite = [](const std::wstring& p) { return (int)SendMessageW(g_hwnd, WM_APP_ASK, 0, (LPARAM)&p); };
     j->job.askPassword = [](std::wstring& pw) { return SendMessageW(g_hwnd, WM_APP_PASSWORD, 0, (LPARAM)&pw) != 0; };
     g_zipLevel = j->level;
+    if (g_hasArc && (j->kind == JK_EXTRACT || j->kind == JK_TEST || j->kind == JK_ADD || j->kind == JK_MODIFY || (j->kind == JK_HASH && j->hashFiles.empty())))
+        PwTrySaved(g_arc);  // 자주 쓰는 암호를 먼저 맞춰 본다 (맞으면 묻지 않음)
     switch (j->kind) {
     case JK_COMPRESS: {
         std::vector<AddItem> items;
@@ -813,6 +883,25 @@ static DWORD WINAPI JobThread(LPVOID) {
             DeleteFileW(LongPath(tmp).c_str());
         } else
             j->ok = AnyCreate(j->target, items, j->split, j->job, j->err, j->password);
+        if (j->ok && j->delSrc && !j->job.cancel) {  // 원본을 지우기 전에 만든 파일을 끝까지 풀어 보기 (파일은 쓰지 않음)
+            std::wstring made = FileExists(j->target) || !FileExists(j->target + L".001") ? j->target : j->target + L".001";
+            AnyArchive t;
+            std::wstring e, pw = j->password;
+            bool asked = false;
+            if (t.Open(made, e, [&](std::wstring& p) { if (asked || pw.empty()) return false; asked = true; p = pw; return true; })) {
+                if (!pw.empty()) AnyTryPasswords(t, {pw});
+                std::vector<int> all;
+                for (size_t i = 0; i < t.entries.size(); i++) all.push_back((int)i);
+                j->filesDone = 0;
+                j->job.total = 0; j->job.done = 0;
+                j->job.testOnly = true;
+                int f = 0; std::wstring fe, er;
+                bool ok = AnyExtract(t, all, L"", L"", j->job, er, f, fe);
+                j->job.testOnly = false;
+                j->srcVerified = ok && f == 0 && !j->job.cancel;
+            }
+            if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+        }
         if (!j->password.empty()) SecureZeroMemory(&j->password[0], j->password.size() * sizeof(wchar_t));
         break;
     }
@@ -2017,12 +2106,16 @@ static void DrawProgPill(Graphics& g, HDC dc, const Btn& b) {
     FillR(g, r, SF(10), hov ? Mix(P.panel, P.text, 0.06f) : P.panel);
     StrokeR(g, r, SF(10), P.border);
     int pct = JobPercent();
-    std::wstring t = std::wstring(JobName()) + L" 중 " + std::to_wstring(pct) + L"%";
+    std::wstring t = std::wstring(JobName()) + L" 중" + (g_job->kind == JK_SCAN ? std::wstring(L"…") : L" " + std::to_wstring(pct) + L"%");
     Txt(dc, {r.left + S(14), r.top + S(4), r.right - S(14), r.top + S(24)}, t, P.text, g_fontBold);
     Txt(dc, {r.left + S(14), r.top + S(4), r.right - S(14), r.top + S(24)}, L"진행 창 보기", P.accentFg, g_fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     RECT bar{r.left + S(14), r.bottom - S(13), r.right - S(14), r.bottom - S(8)};
     FillR(g, bar, SF(2.5f), P.track);
     RECT f = bar; f.right = bar.left + (bar.right - bar.left) * pct / 100;
+    if (g_job->kind == JK_SCAN) {  // 진행률을 모르는 백신 검사: 움직이는 막대
+        int bw = bar.right - bar.left, seg = bw / 4, pos = (int)((GetTickCount() / 8) % (DWORD)(bw + seg)) - seg;
+        f = {bar.left + max(0, pos), bar.top, bar.left + min(bw, pos + seg), bar.bottom};
+    }
     if (f.right > f.left + S(4)) FillG(g, f, SF(2.5f), P.accent, P.accent2);
 }
 
@@ -3037,6 +3130,32 @@ static void ProgPaint(HWND h, HDC dc) {
     int pct = total ? (int)min<uint64_t>(100, done * 100 / total) : 0;
     RECT bar{S(24), S(90), cr.right - S(24), S(100)};
     FillR(g, bar, SF(5), P.track);
+    if (j->kind == JK_SCAN) {
+        // 백신 검사: 진행률을 알 수 없으므로 막대가 좌우로 움직이고 경과 시간을 보여 준다 (멈춘 게 아님을 알 수 있게)
+        int bw = bar.right - bar.left, seg = bw / 4;
+        DWORD el = GetTickCount() - g_prog.start;
+        int pos = (int)((el / 8) % (DWORD)(bw + seg)) - seg;
+        RECT f{bar.left + max(0, pos), bar.top, bar.left + min(bw, pos + seg), bar.bottom};
+        if (f.right > f.left + S(2)) FillG(g, f, SF(5), P.accent, P.accent2 == NONE ? Mix(P.accent, RGB(255, 255, 255), 0.35f) : P.accent2);
+        wchar_t t[64];
+        swprintf(t, 64, L"경과 %u:%02u", el / 60000, (el / 1000) % 60);
+        uint32_t ft2 = j->filesTotal, fd2 = min<uint32_t>(j->filesDone, ft2);
+        Txt(dc, {S(24), S(110), tr, S(132)}, L"Windows Defender 로 검사하는 중입니다", P.text, g_fontBold);
+        Txt(dc, {S(24), S(110), tr, S(132)}, t, P.dim, g_font, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        Txt(dc, {tx, S(50), tr, S(70)}, cur.empty() ? FileNameOf(j->hashFiles.empty() ? L"" : j->hashFiles[0]) : cur, P.dim, g_fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        std::wstring l1 = L"검사할 크기: " + FmtMB(total) + (ft2 > 1 ? L" · 조각 " + std::to_wstring(ft2) + L"개 중 " + std::to_wstring(max<uint32_t>(1, fd2)) + L"번째" : L"");
+        Txt(dc, {S(24), S(136), tr, S(156)}, l1, P.dim, g_font);
+        Txt(dc, {S(24), S(158), tr, S(178)}, L"큰 파일은 몇 분 걸릴 수 있습니다. 취소하면 바로 멈춥니다.", P.dim, g_font);
+        auto btnS = [&](RECT r, const wchar_t* t2, int id) {
+            bool hv = g_prog.hover == id;
+            FillR(g, r, SF(6), hv ? P.hover : P.btn);
+            StrokeR(g, r, SF(6), P.btnBorder == NONE ? P.border : P.btnBorder);
+            Txt(dc, r, t2, P.text, g_font, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        };
+        btnS(g_prog.bBg, L"백그라운드로 작업", 1);
+        btnS(g_prog.bCancel, L"취소", 2);
+        return;
+    }
     RECT f = bar; f.right = bar.left + (int)((int64_t)(bar.right - bar.left) * pct / 100);
     if (f.right > f.left + S(6)) FillG(g, f, SF(5), P.accent, P.accent2 == NONE ? Mix(P.accent, RGB(255, 255, 255), 0.35f) : P.accent2);
     std::wstring p1 = std::to_wstring(pct) + L"% 완료";
@@ -3116,7 +3235,7 @@ static LRESULT CALLBACK ProgProc(HWND h, UINT m, WPARAM w, LPARAM lp) {
             ShowWindow(h, SW_SHOW);
             if (g_mainHidden) SetForegroundWindow(h);
         }
-        TaskbarProgress(g_job->job.done, g_job->job.total);
+        TaskbarProgress(g_job->kind == JK_SCAN ? 0 : (uint64_t)g_job->job.done, g_job->kind == JK_SCAN ? 0 : (uint64_t)g_job->job.total);
         if (IsWindowVisible(h) && !IsIconic(h)) InvalidateRect(h, nullptr, FALSE);
         if (g_progHidden) InvalidateRect(g_hwnd, nullptr, FALSE);
         return 0;
@@ -3193,7 +3312,7 @@ static bool EndsI(const std::wstring& s, const wchar_t* e) {
 static bool IsTarPath(const std::wstring& p) { return EndsI(p, L".tar") || EndsI(p, L".tar.gz") || EndsI(p, L".tgz"); }
 static std::wstring PresetExt(int preset) { return preset == 0 || !SzAvailable() ? L".zip" : L".7z"; }
 
-struct CompressOpts { std::wstring target, password; bool split = false, sfx = false; int preset = 0; };
+struct CompressOpts { std::wstring target, password; bool split = false, sfx = false, delSrc = false; int preset = 0; };
 
 struct SetState {
     bool compress = false;
@@ -3313,6 +3432,7 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
     int ni = 0;
     for (auto& n : nav) {
         if (n.page == 3 && s->compress) continue;
+        const wchar_t* label = n.page == 1 && s->compress ? L"압축 방식" : n.t;  // 압축 설정 창: 이번 압축에만 쓰는 선택 (프리셋은 설정에서만)
         RECT r{S(12), S(68) + ni * S(46), nw - S(12), S(68) + ni * S(46) + S(40)};
         ni++;
         bool cur = s->page == n.page;
@@ -3322,7 +3442,7 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
             else if (s->hover == 1 + n.page) FillR(*g, r, SF(8), P.hover);
             if (cur) FillR(*g, {r.left, r.top + S(10), r.left + S(3), r.bottom - S(10)}, SF(1.5f), P.accentFg);
             DrawIco(*g, nav[i].ic, (REAL)r.left + S(14), (REAL)(r.top + r.bottom - S(18)) / 2, (REAL)S(18), cur ? P.accentFg : P.dim);
-            Txt(dc, {r.left + S(42), r.top, r.right, r.bottom}, nav[i].t, cur ? P.text : P.dim, cur ? g_fontBold : g_font);
+            Txt(dc, {r.left + S(42), r.top, r.right, r.bottom}, label, cur ? P.text : P.dim, cur ? g_fontBold : g_font);
         }
         SetHot(1 + n.page, r);
     }
@@ -3354,6 +3474,11 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         bool preset = false;
         for (int i = 0; i < 6; i++) { bool c = g_splitMB == SPLIT_PRESETS[i]; preset |= c; chip(30 + i, x, y, SPLIT_CHIPS[i], c && sp, sp); }
         chip(36, x, y, preset ? std::wstring(L"직접 입력…") : SplitLabel(g_splitMB), !preset && sp, sp);
+        y += S(52);
+        T({cx, y, cr - S(60), y + S(24)}, L"압축 후 원본 지우기", P.text, g_fontBold);
+        toggle(23, cr - S(42), y, s->o.delSrc, true);
+        y += S(26);
+        T({cx, y, cr, y + S(20)}, L"만든 압축 파일을 끝까지 검사해 이상이 없을 때만 원본을 휴지통으로 옮깁니다. (이번 압축에만)", P.dim, g_fontSmall);
     } else if (s->page == 3) {
         head(L"색상");
         int x = cx;
@@ -3421,7 +3546,7 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         for (int i = 0; i < 6; i++) { bool c = g_splitMB == SPLIT_PRESETS[i]; preset |= c; chip(30 + i, x, y, SPLIT_CHIPS[i], c, true); }
         chip(36, x, y, preset ? std::wstring(L"직접 입력…") : SplitLabel(g_splitMB), !preset, true);
     } else if (s->page == 1) {
-        head(L"프리셋");
+        head(s->compress ? L"압축 방식 (이번 압축에만)" : L"프리셋");
         int gap = S(12), cw = (cr - cx - 2 * gap) / 3, chh = S(118);
         bool tar = s->compress && IsTarPath(s->o.target);
         for (int i = 0; i < 3; i++) {
@@ -3526,13 +3651,18 @@ static void SetDraw(Graphics* g, HDC dc, int W, int H) {
         if (!s->compress) {
             T({cx, y, cr - S(60), y + S(24)}, L"풀기 전에 백신으로 검사 (Windows Defender)", P.text, g_font);
             toggle(78, cr - S(42), y, RegGet(L"ScanBeforeExtract", 0) != 0, true);
-            y += S(32);
+            y += S(36);
+            int n = PwCount();
+            T({cx, y, cr - S(214), y + S(34)}, L"자주 쓰는 암호" + (n ? L" (" + std::to_wstring(n) + L"개)" : std::wstring(L" (없음)")), P.text, g_font, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            button(75, {cr - S(206), y, cr - S(110), y + S(34)}, L"추가…", false);
+            button(79, {cr - S(102), y, cr, y + S(34)}, L"관리…", false);
+            y += S(44);
         }
         T({cx, y, cr, y + S(110)},
           L"· 암호는 AES-256 으로 걸립니다. 암호를 잊으면 누구도 복구할 수 없습니다.\n"
           L"· ZIP 은 파일 이름 목록이 보이고 내용만 잠깁니다. 7z 는 이름까지 숨깁니다.\n"
           L"· TAR / TAR.GZ 형식은 암호를 지원하지 않습니다.\n"
-          L"· 입력한 암호는 저장하지 않습니다.", P.dim, g_fontSmall, DT_LEFT | DT_WORDBREAK);
+          L"· 압축할 때 건 암호는 저장하지 않습니다. 자주 쓰는 암호는 이 PC·사용자 전용으로 암호화해 둡니다.", P.dim, g_fontSmall, DT_LEFT | DT_WORDBREAK);
     }
     // 아래 버튼
     if (g) { FillR(*g, {1, H - S(68), W - 1, H - 1}, 0, Mix(P.panel, P.text, g_dark ? 0.04f : 0.025f)); HLine(*g, 1, W - 1, H - S(68), P.border); }
@@ -3644,6 +3774,7 @@ static void SetClick(int id) {
     }
     if (id == 20) { s->encrypt = !s->encrypt; SetRefresh(); if (s->encrypt) SetFocus(s->e1); return; }
     if (id == 21) { s->o.split = !s->o.split; SetRefresh(); return; }
+    if (id == 23) { s->o.delSrc = !s->o.delSrc; SetRefresh(); return; }
     if (id == 22) {  // 자동 실행 파일: 확장자를 .exe 로 (끄면 프리셋 형식으로)
         s->o.sfx = !s->o.sfx;
         std::wstring t = s->o.target;
@@ -3696,6 +3827,62 @@ static void SetClick(int id) {
             RegStr(REG_KEY, L"UpdateUrl", v);
             RegDeleteKeyValueW(HKEY_CURRENT_USER, REG_KEY, L"UpdateSkip");
         }
+        SetRefresh();
+        return;
+    }
+    if (id == 75) {  // 자주 쓰는 암호 추가
+        DlgSpec d;
+        d.title = L"자주 쓰는 암호 추가";
+        d.msg = L"압축을 풀 때 이 암호를 먼저 넣어 봅니다. 맞으면 암호를 묻지 않습니다.";
+        d.buttons = {L"추가", L"취소"};
+        d.def = 0; d.cancel = 1;
+        d.input = true; d.password = true; d.confirm = true;
+        d.label1 = L"암호"; d.label2 = L"암호 확인";
+        EnableWindow(s->h, FALSE);
+        int r = RunDialog(s->h, d);
+        EnableWindow(s->h, TRUE); if (!g_mainHidden) EnableWindow(g_hwnd, FALSE);
+        SetForegroundWindow(s->h);
+        if (r == 0 && !d.inputText.empty()) {
+            if (d.inputText != d.inputText2) MsgBox(L"자주 쓰는 암호", L"두 암호가 서로 다릅니다. 다시 입력하세요.");
+            else if (!PwAdd(d.inputText)) MsgBox(L"자주 쓰는 암호", L"이미 들어 있는 암호입니다.");
+        }
+        if (!d.inputText.empty()) SecureZeroMemory(&d.inputText[0], d.inputText.size() * sizeof(wchar_t));
+        if (!d.inputText2.empty()) SecureZeroMemory(&d.inputText2[0], d.inputText2.size() * sizeof(wchar_t));
+        SetRefresh();
+        return;
+    }
+    if (id == 79) {  // 자주 쓰는 암호 관리: 가려서 보여 주고, 고르면 지울지 묻는다
+        std::vector<std::wstring> v = PwLoad();
+        std::vector<MItem> items;
+        if (v.empty()) items.push_back({0, L"저장한 암호가 없습니다", 2, false, false});
+        else items.push_back({0, L"지울 암호를 고르세요", 2, false, false});
+        for (size_t i = 0; i < v.size(); i++) {
+            std::wstring m = v[i].substr(0, 1) + std::wstring(min<size_t>(8, v[i].size() > 1 ? v[i].size() - 1 : 0), L'•') + L"  (" + std::to_wstring(v[i].size()) + L"자)";
+            items.push_back({(int)i + 1, m, 0, false, true});
+        }
+        if (v.size() > 1) { items.push_back({0, L"", 1, false, false}); items.push_back({1000, L"모두 지우기", 0, false, true}); }
+        RECT a{};
+        for (auto& h : s->hot) if (h.first == 79) a = h.second;
+        MapWindowPoints(s->h, nullptr, (POINT*)&a, 2);
+        int id2 = RunPopup(s->h, a, items, true);
+        if (id2 > 0) {
+            DlgSpec d;
+            d.title = L"자주 쓰는 암호";
+            d.msg = id2 == 1000 ? L"저장한 암호를 모두 지울까요?" : L"이 암호를 지울까요?\n" + items[(size_t)id2].text;
+            d.buttons = {L"지우기", L"취소"};
+            d.def = 1; d.cancel = 1;
+            EnableWindow(s->h, FALSE);
+            int r = RunDialog(s->h, d);
+            EnableWindow(s->h, TRUE); if (!g_mainHidden) EnableWindow(g_hwnd, FALSE);
+            SetForegroundWindow(s->h);
+            if (r == 0) {
+                if (id2 == 1000) PwWipe(v);
+                else { std::wstring& x = v[(size_t)id2 - 1]; SecureZeroMemory(&x[0], x.size() * sizeof(wchar_t)); v.erase(v.begin() + (id2 - 1)); }
+                PwStore(v);
+            }
+        }
+        for (auto& it : items) if (!it.text.empty()) SecureZeroMemory(&it.text[0], it.text.size() * sizeof(wchar_t));
+        PwWipe(v);
         SetRefresh();
         return;
     }
@@ -3899,8 +4086,7 @@ static bool RunSettings(bool compress, CompressOpts* opts, int page) {
     RegSet(L"Opacity", (DWORD)g_opacity);
     if (st.result && compress) {
         if (!st.encrypt || IsTarPath(st.o.target)) st.o.password.clear();
-        g_preset = st.o.preset;
-        RegSet(L"Preset", (DWORD)g_preset);
+        // 여기서 고른 빠름·보통·최대는 이번 압축에만 쓴다. 프리셋(고정값)은 설정 → 프리셋에서만 바뀜
         if (!st.o.sfx) RegSet(L"Format", EndsI(st.o.target, L".7z") ? 1 : IsTarPath(st.o.target) ? (EndsI(st.o.target, L".tar") ? 3 : 2) : 0);
         if (st.o.sfx) st.o.split = false;
         *opts = st.o;
@@ -3954,21 +4140,35 @@ static bool AskPassword(std::wstring& pw, bool again) {
     DlgSpec d;
     d.title = L"암호 입력";
     d.msg = std::wstring(again ? L"암호가 틀렸습니다. 다시 입력하세요.\n\n" : L"") + L"암호로 보호된 압축 파일입니다.";
-    d.buttons = {L"확인", L"취소"};
-    d.def = 0; d.cancel = 1;
+    d.buttons = {L"확인", L"저장하고 확인", L"취소"};
+    d.def = 0; d.cancel = 2;
     d.input = true; d.password = true;
-    if (RunDialog(g_hwnd, d) != 0 || d.inputText.empty()) return false;
+    d.note = L"'저장하고 확인': 맞으면 자주 쓰는 암호에 넣어 다음부터 묻지 않습니다.";
+    int r = RunDialog(g_hwnd, d);
+    if (r == 2 || r < 0 || d.inputText.empty()) return false;
     pw = d.inputText;
+    if (!g_pwToSave.empty()) SecureZeroMemory(&g_pwToSave[0], g_pwToSave.size() * sizeof(wchar_t));
+    g_pwToSave = r == 1 ? pw : L"";
+    SecureZeroMemory(&d.inputText[0], d.inputText.size() * sizeof(wchar_t));
     return true;
 }
 static std::wstring* g_reopenPw = nullptr;
 static bool OpenArchive(const std::wstring& pathIn, const std::wstring& dirPath = L"") {
     std::wstring err, p = pathIn;  // g_arc.path 를 넘겨받아도 안전하도록 복사
-    std::function<bool(std::wstring&)> ask = [](std::wstring& pw) {
+    // 이름까지 암호화된 7z 등: 방금 건 암호 → 자주 쓰는 암호 → 사람에게 묻기(3번까지)
+    std::vector<std::wstring> saved = PwLoad();
+    size_t si = 0;
+    int asks = 0;
+    std::function<bool(std::wstring&)> ask = [&](std::wstring& pw) {
         if (g_reopenPw && !g_reopenPw->empty()) { pw = *g_reopenPw; g_reopenPw->clear(); return true; }  // 방금 건 암호
-        return AskPassword(pw, false);
+        if (si < saved.size()) { pw = saved[si++]; return true; }
+        if (asks >= 3) return false;
+        return AskPassword(pw, asks++ > 0);
     };
-    if (!g_arc.Open(p, err, ask)) {
+    bool opened = g_arc.Open(p, err, ask);
+    PwWipe(saved);
+    PwCommitPending(opened);
+    if (!opened) {
         g_hasArc = false;
         g_dirs.clear(); g_rows.clear(); g_sel.clear();
         if (g_fs) FsShow(FileNameOf(p));
@@ -4037,7 +4237,7 @@ static void ApplyCpuMode(bool working) {
     SetPriorityClass(GetCurrentProcess(), working && quiet ? BELOW_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS);
 }
 static void StartJobNow(JobState* j) {
-    j->level = PRESET_LEVEL[max(0, min(2, g_preset))];
+    j->level = j->levelFixed > 0 ? j->levelFixed : PRESET_LEVEL[max(0, min(2, g_preset))];
     ApplyCpuMode(true);
     g_job = j;
     g_progHidden = false;
@@ -4122,6 +4322,8 @@ static void StartCompress(std::vector<std::wstring> src, bool split) {
     j->target = o.target;
     j->split = o.split && !o.sfx ? g_splitMB * 1024 * 1024 : 0;
     j->sfx = o.sfx;
+    j->delSrc = o.delSrc;
+    j->levelFixed = PRESET_LEVEL[max(0, min(2, o.preset))];
     StartJob(j);
 }
 
@@ -4129,9 +4331,15 @@ static void StartCompress(std::vector<std::wstring> src, bool split) {
 static bool AskNewPassword(std::wstring& pw, bool sevenZip);
 static void QuickCompress(const std::vector<std::wstring>& src, int mode) {
     if (src.empty()) return;
+    // 바로 압축은 설정의 프리셋(고정값)을 따른다. '다른 방식으로 압축 ▸' 항목만 이번 한 번 다른 방식으로
     int preset = g_preset;
     if (preset > 0 && !SzAvailable()) preset = 0;
+    if (mode == QC_ZIP) preset = 0;
+    else if (mode == QC_7Z) preset = 1;
+    else if (mode == QC_7ZMAX) preset = 2;
+    if (preset > 0 && !SzAvailable()) { MsgBox(L"7z 로 압축", L"7z.dll 이 없어 7z 로 만들 수 없습니다."); return; }
     std::wstring ext = PresetExt(preset), dir = QnParent(src[0]);
+    int level = mode == QC_ZIPMAX ? PRESET_LEVEL[2] : PRESET_LEVEL[preset];
     if (!dir.empty() && dir.back() != L'\\') dir += L'\\';
     auto job = [&](const std::vector<std::wstring>& items, const std::wstring& stem, const std::wstring& pw) {
         JobState* j = new JobState();
@@ -4139,6 +4347,8 @@ static void QuickCompress(const std::vector<std::wstring>& src, int mode) {
         j->sources = items;
         j->target = UniqueFile(dir + stem, ext);
         j->password = pw;
+        j->levelFixed = level;
+        if (mode == QC_SPLIT) j->split = g_quickSplitMB * 1024 * 1024;
         StartJob(j);
     };
     if (mode == QC_EACH) { for (auto& p : src) job({p}, QnStem(p), L""); return; }
@@ -4302,6 +4512,8 @@ static bool g_menuLaunch = false;   // 우클릭 메뉴(풀기)로 실행됨 →
 static bool g_quietDone = false;    // 완료 대화상자 없이 종료
 
 static std::wstring ArchiveStem() { return fmt::Stem(g_arc.path); }
+static std::wstring g_multiPickDir;  // 여러 압축 파일 '풀 위치 선택': 한 번만 묻는다
+static int g_multiMode = -1;         // 여러 압축 파일 차례로 풀기·검사 중이면 XT_* 또는 MULTI_TEST
 static bool ExtractAllTo(int mode) {
     std::wstring dest, parent = ParentOf(g_arc.path);
     if (mode == XT_HERE) dest = parent;
@@ -4312,7 +4524,9 @@ static bool ExtractAllTo(int mode) {
     }
     else {
         std::wstring dir;
-        if (!PickFolder(dir, parent, L"압축을 풀 위치 선택")) return false;
+        if (g_multiMode >= 0 && !g_multiPickDir.empty()) dir = g_multiPickDir;
+        else if (!PickFolder(dir, parent, L"압축을 풀 위치 선택")) return false;
+        if (g_multiMode >= 0) g_multiPickDir = dir;
         // 루트에 항목이 하나뿐이면 그대로, 여러 개면 "압축파일이름" 폴더를 만들어 그 안에
         auto& root = g_dirs[0];
         dest = dir;
@@ -5340,7 +5554,9 @@ static bool ExtractNow(const std::vector<int>& idx, const std::wstring& strip, c
     int failed = 0;
     std::wstring fe;
     HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    PwTrySaved(g_arc);
     bool ok = AnyExtract(g_arc, idx, strip, dir, job, err, failed, fe);
+    PwCommitPending(ok && !failed);
     SetCursor(old);
     if (ok && failed) { err = fe; ok = false; }
     return ok;
@@ -5696,6 +5912,83 @@ static bool RecycleArchive() {
     return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
 }
 
+// ---- 우클릭: 압축 파일 여러 개를 하나씩 차례로 풀기·검사 (CPU 를 한꺼번에 쓰지 않도록 동시에 돌리지 않음)
+static const int MULTI_TEST = 100;
+static std::vector<std::wstring> g_multiArcs;   // 남은 압축 파일
+static int g_multiTotal = 0, g_multiFail = 0;
+static std::wstring g_multiReport;
+// 분할 조각은 첫 조각만 (a.z01 은 a.zip 이 있으면 빼고, a.7z.002 · a.part2.rar 은 뺌), 같은 것 두 번 빼기
+static std::vector<std::wstring> MultiFilter(const std::vector<std::wstring>& paths) {
+    std::vector<std::wstring> v;
+    for (auto& p : paths) {
+        if (!fmt::IsArchivePath(p) || !FileExists(p)) continue;
+        std::wstring e = fmt::Ext(p), base = p.substr(0, p.size() - e.size() - 1);
+        if (e.size() >= 3 && e[0] == L'z' && fmt::Digits(e, 1) && FileExists(base + L".zip")) continue;
+        if (e.size() >= 3 && fmt::Digits(e) && _wtoi(e.c_str()) != 1) continue;
+        std::wstring lo = fmt::Lower(p);
+        size_t pp = lo.rfind(L".part");
+        if (e == L"rar" && pp != std::wstring::npos && fmt::Digits(lo.substr(pp + 5, lo.size() - pp - 9)) && _wtoi(lo.c_str() + pp + 5) > 1) continue;
+        bool dup = false;
+        for (auto& x : v) if (!lstrcmpiW(x.c_str(), p.c_str())) dup = true;
+        if (!dup) v.push_back(p);
+    }
+    return v;
+}
+static void MultiFinish() {
+    int mode = g_multiMode;
+    g_multiMode = -1;
+    g_multiPickDir.clear();
+    if (mode == MULTI_TEST)
+        MsgBox(g_multiFail ? L"압축 파일 검사: 문제 발견" : L"압축 파일 검사: 이상 없음", g_multiReport);
+    else if (g_multiFail)  // 풀기: 모두 잘 되면 조용히 끝냄, 문제가 있을 때만 알림
+        MsgBox(L"일부 압축 파일을 풀지 못했습니다", g_multiReport);
+    g_multiReport.clear();
+    if (IsWindow(g_hwnd) && !Busy()) DestroyWindow(g_hwnd);
+}
+static bool MultiNext() {
+    while (!g_multiArcs.empty()) {
+        std::wstring p = g_multiArcs.front();
+        g_multiArcs.erase(g_multiArcs.begin());
+        if (!OpenArchive(p)) { g_multiFail++; g_multiReport += L"[실패] " + FileNameOf(p) + L" — 열 수 없음\n"; continue; }
+        if (g_multiMode == MULTI_TEST) {
+            JobState* j = new JobState();
+            j->kind = JK_TEST;
+            for (size_t i = 0; i < g_arc.entries.size(); i++) j->idx.push_back((int)i);
+            j->arcPath = g_arc.path;
+            StartJob(j);
+            return true;
+        }
+        if (ExtractAllTo(g_multiMode)) return true;
+        if (g_multiMode == XT_PICK) { g_multiArcs.clear(); break; }  // 위치 고르기를 취소
+    }
+    MultiFinish();
+    return false;
+}
+static void MultiStart(const std::vector<std::wstring>& paths, int mode) {
+    g_multiArcs = MultiFilter(paths);
+    g_multiTotal = (int)g_multiArcs.size();
+    g_multiFail = 0;
+    g_multiReport.clear();
+    g_multiMode = mode;
+    MultiNext();
+}
+// 압축 후 원본 지우기: 휴지통으로 (만든 압축 파일이 원본 폴더 안에 있으면 지우지 않음)
+static bool RecycleSources(const std::vector<std::wstring>& src, const std::wstring& target, std::wstring& why) {
+    std::wstring t = fmt::Lower(target), from;
+    for (auto& p : src) {
+        std::wstring lp = fmt::Lower(p);
+        if (!lp.empty() && lp.back() != L'\\') lp += L'\\';
+        if (t.compare(0, lp.size(), lp) == 0) { why = L"만든 압축 파일이 원본 폴더 안에 있어 원본을 지우지 않았습니다."; return false; }
+        from += p; from += L'\0';
+    }
+    from += L'\0';
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE; op.pFrom = from.c_str(); op.fFlags = FOF_ALLOWUNDO | FOF_NO_UI;
+    if (SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted) return true;
+    why = L"원본을 휴지통으로 옮기지 못했습니다. (사용 중인 파일이 있을 수 있음)";
+    return false;
+}
+
 static void ShowHashResult(JobState* j);
 static void UpdAfterJob();
 static void ApplyCpuMode(bool working);
@@ -5716,6 +6009,27 @@ static void OnJobDone() {
     // 다음 작업부터 시작해 두고 결과를 보여 준다
     if (more) { JobState* n = g_queue.front(); g_queue.erase(g_queue.begin()); StartJobNow(n); }
     Relayout();
+    if (j->kind == JK_EXTRACT || j->kind == JK_TEST || j->kind == JK_ADD || j->kind == JK_MODIFY || j->kind == JK_HASH)
+        PwCommitPending(j->ok && !j->failed && !cancelled);  // '저장하고 확인'으로 넣은 암호가 맞았으면 저장
+    if (j->kind == JK_COMPRESS && j->delSrc && !j->convert && j->ok) {  // 압축 후 원본 지우기
+        std::wstring why;
+        if (!j->srcVerified) MsgBox(L"원본을 지우지 않았습니다", FileNameOf(j->target) + L"\n\n만든 압축 파일을 검사하지 못했거나 문제가 있어 원본은 그대로 두었습니다.");
+        else if (!RecycleSources(j->sources, j->target, why)) MsgBox(L"원본을 지우지 않았습니다", FileNameOf(j->target) + L"\n\n" + why);
+    }
+    if (g_multiMode >= 0 && (j->kind == JK_EXTRACT || j->kind == JK_TEST) && !j->convert && j->openAfter.empty()) {
+        std::wstring name = FileNameOf(g_arc.path);
+        if (!j->ok) { g_multiFail++; g_multiReport += L"[실패] " + name + L" — " + (cancelled ? std::wstring(L"취소") : j->err) + L"\n"; }
+        else if (j->failed) { g_multiFail++; g_multiReport += L"[문제] " + name + L" — " + std::to_wstring(j->failed) + L"개 항목 문제: " + j->firstError + L"\n"; }
+        else if (j->kind == JK_TEST) g_multiReport += L"[정상] " + name + L" — 이상 없음 (" + std::to_wstring(j->filesTotal) + L"개)\n";
+        else if (g_menuDel) {
+            if (cancelled || g_askSkipped) g_multiReport += L"[보류] " + name + L" — 건너뛴 항목이 있어 지우지 않음\n";
+            else if (!RecycleArchive()) { g_multiFail++; g_multiReport += L"[문제] " + name + L" — 풀었지만 휴지통으로 옮기지 못함\n"; }
+        }
+        if (cancelled && !g_multiArcs.empty()) { g_multiReport += L"(취소해서 나머지 " + std::to_wstring(g_multiArcs.size()) + L"개는 하지 않았습니다)\n"; g_multiArcs.clear(); }
+        delete j;
+        if (!Busy()) MultiNext();
+        return;
+    }
     if (j->kind == JK_EXTRACT && j->convert) {  // 형식 바꾸기 1단계(풀기) 끝 → 새 형식으로 압축
         if (j->ok && !j->failed && !cancelled) {
             std::vector<std::wstring> src;
@@ -5773,6 +6087,11 @@ static void OnJobDone() {
         } else MsgBox(L"백신 검사를 할 수 없습니다", j->err);
         delete j;
         if (next) StartJob(next);
+        else if (g_multiMode >= 0) {  // 여러 압축 파일 풀기 중 이 파일은 검사로 건너뜀 → 다음 파일
+            g_multiFail++; g_multiReport += L"[실패] " + what + L" — 백신 검사 결과로 풀지 않음\n";
+            if (!Busy()) MultiNext();
+            return;
+        }
         if ((g_menuLaunch || g_menuScan || g_menuConv) && !Busy()) DestroyWindow(g_hwnd);
         return;
     }
@@ -6727,8 +7046,14 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     DoLayout();
     ApplyOpacity(hw);
     // 우클릭 메뉴의 압축/풀기는 메인 창 없이 설정 창·진행 창만 띄운다
-    int quick = verb == L"c-folder" ? QC_FOLDER : verb == L"c-name" ? QC_NAME : verb == L"c-date" ? QC_DATE : verb == L"c-each" ? QC_EACH : verb == L"c-pw" ? QC_PW : QC_NONE;
-    bool menuJob = verb == L"scan" || verb == L"conv-zip" || verb == L"conv-7z" || verb == L"new-folder" || verb == L"compress" || verb == L"split" || verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del" || quick;
+    int quick = verb == L"c-folder" ? QC_FOLDER : verb == L"c-name" ? QC_NAME : verb == L"c-date" ? QC_DATE : verb == L"c-each" ? QC_EACH : verb == L"c-pw" ? QC_PW :
+                verb == L"c-zip" ? QC_ZIP : verb == L"c-7z" ? QC_7Z : verb == L"c-7zmax" ? QC_7ZMAX : verb == L"c-zipmax" ? QC_ZIPMAX : QC_NONE;
+    // 우클릭 '분할 압축 ▸ 100MB 씩' 등: 프리셋 형식으로 바로 분할 압축
+    if (verb == L"s-10" || verb == L"s-20" || verb == L"s-100" || verb == L"s-700" || verb == L"s-4g") {
+        quick = QC_SPLIT;
+        g_quickSplitMB = verb == L"s-4g" ? 4095 : (uint64_t)_wtoi(verb.c_str() + 2);
+    }
+    bool menuJob = verb == L"test" || verb == L"scan" || verb == L"conv-zip" || verb == L"conv-7z" || verb == L"new-folder" || verb == L"compress" || verb == L"split" || verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del" || quick;
     g_mainHidden = menuJob;
     if (!menuJob) { ShowWindow(hw, show); UpdateWindow(hw); }
     ShellRefreshPath();
@@ -6736,7 +7061,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     if (verb == L"scan" || verb == L"conv-zip" || verb == L"conv-7z") {  // 우클릭: 백신으로 검사 / 형식 바꾸기
         (verb == L"scan" ? g_menuScan : g_menuConv) = true;
         if (verb == L"scan") {
-            if (!paths.empty()) { JobState* sc = MakeScanJob({paths[0]}); StartJob(sc); }
+            std::vector<std::wstring> arcs = paths.size() > 1 ? MultiFilter(paths) : paths;  // 여러 개: 압축 파일 모두 한 번에 검사
+            if (!arcs.empty()) { JobState* sc = MakeScanJob(arcs); StartJob(sc); }
         } else if (!paths.empty() && OpenArchive(paths[0])) StartConvert(verb == L"conv-zip" ? L".zip" : L".7z");
         if (IsWindow(hw) && !Busy()) DestroyWindow(hw);
     } else if (verb == L"new-folder") {  // 탐색기 폴더 빈 곳 우클릭 → 새 폴더
@@ -6750,6 +7076,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
         if (paths.empty()) DestroyWindow(hw);
         else { g_menuCompress = true; StartCompress(paths, verb == L"split"); }
         if (IsWindow(hw) && !Busy()) DestroyWindow(hw);  // 설정 창에서 취소
+    } else if (verb == L"test" || (paths.size() > 1 && (verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del"))) {
+        // 압축 파일 검사(하나·여러 개) / 여러 압축 파일 풀기: 하나씩 차례로, 끝나면 한 번에 결과
+        g_menuLaunch = true;
+        g_quietDone = true;
+        g_menuDel = verb == L"x-del";
+        MultiStart(paths, verb == L"test" ? MULTI_TEST : verb == L"x-smart" || verb == L"x-del" ? XT_SMART : verb == L"x-here" ? XT_HERE : verb == L"x-folder" ? XT_FOLDER : XT_PICK);
     } else if (verb == L"x-here" || verb == L"x-folder" || verb == L"x-to" || verb == L"x-smart" || verb == L"x-del") {
         g_menuLaunch = true;
         g_quietDone = verb != L"x-to";

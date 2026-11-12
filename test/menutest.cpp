@@ -82,11 +82,21 @@ int wmain(int argc, wchar_t** argv) {
             for (int j = 0; j < GetMenuItemCount(mi.hSubMenu); j++) {
                 wchar_t s[256] = {};
                 MENUITEMINFOW si{sizeof(si)};
-                si.fMask = MIIM_STRING | MIIM_FTYPE | MIIM_ID;
+                si.fMask = MIIM_STRING | MIIM_FTYPE | MIIM_ID | MIIM_SUBMENU;
                 si.dwTypeData = s; si.cch = 256;
                 GetMenuItemInfoW(mi.hSubMenu, j, TRUE, &si);
                 if (si.fType & MFT_SEPARATOR) Out(L"      ──");
-                else {
+                else if (si.hSubMenu) {
+                    Out(std::wstring(L"      ") + s + L" ▸");
+                    for (int k = 0; k < GetMenuItemCount(si.hSubMenu); k++) {
+                        wchar_t c[256] = {}; MENUITEMINFOW ci2{sizeof(ci2)};
+                        ci2.fMask = MIIM_STRING | MIIM_ID; ci2.dwTypeData = c; ci2.cch = 256;
+                        GetMenuItemInfoW(si.hSubMenu, k, TRUE, &ci2);
+                        wchar_t verb[64] = {};
+                        cm->GetCommandString(ci2.wID - 100, GCS_VERBW, nullptr, (LPSTR)verb, 64);
+                        Out(std::wstring(L"          ") + std::to_wstring(ci2.wID - 100) + L". " + c + L"   (" + verb + L")");
+                    }
+                } else {
                     wchar_t verb[64] = {};
                     cm->GetCommandString(si.wID - 100, GCS_VERBW, nullptr, (LPSTR)verb, 64);
                     Out(std::wstring(L"      ") + std::to_wstring(si.wID - 100) + L". " + s + L"   (" + verb + L")");

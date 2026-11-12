@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "LogicLib.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.20.0"
+  !define VERSION "1.21.0"
 !endif
 !define APPNAME   "차곡"
 !define APPID     "Chagok"

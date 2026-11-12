@@ -4,7 +4,7 @@
 //   여러 개 골랐을 때     : 들어 있는 폴더 이름                  예) 자료\a.hwp, 자료\b.xlsx → 자료.zip
 //   '누른 파일 이름으로'   : 우클릭한(첫) 항목 이름
 //   날짜 붙이기           : 이름_20261103
-//   확장자                : 설정의 프리셋 (빠름 = .zip, 보통·최대 = .7z — 7z.dll 이 있을 때만)
+//   확장자                : 설정의 프리셋 (빠름 = .zip, 보통·최대 = .7z — 7z.dll 이 있을 때만). 다른 방식은 '다른 방식으로 압축 ▸'
 #pragma once
 #include <windows.h>
 #include <string>
@@ -51,13 +51,18 @@ inline std::wstring QnToday() {
     wchar_t b[16]; wsprintfW(b, L"%04d%02d%02d", t.wYear, t.wMonth, t.wDay);
     return b;
 }
-// 프리셋에 맞는 확장자. exeDir: 7z.dll 이 있는 차곡 폴더 (끝에 \ 있어도 됨)
-inline std::wstring QnExt(const std::wstring& exeDir) {
-    DWORD preset = 0, sz = sizeof(preset);
-    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Sinsul\\Chagok", L"Preset", RRF_RT_REG_DWORD, nullptr, &preset, &sz);
-    if (preset == 0) return L".zip";
+inline bool QnHas7z(const std::wstring& exeDir) {
     std::wstring d = exeDir;
     if (!d.empty() && d.back() != L'\\') d += L'\\';
     DWORD a = GetFileAttributesW((d + L"7z.dll").c_str());
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) ? L".7z" : L".zip";
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
+// 설정의 프리셋 (0 빠름 1 보통 2 최대). 7z.dll 이 없으면 빠름
+inline int QnPreset(const std::wstring& exeDir) {
+    DWORD preset = 0, sz = sizeof(preset);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Sinsul\\Chagok", L"Preset", RRF_RT_REG_DWORD, nullptr, &preset, &sz);
+    if (preset > 2) preset = 2;
+    return preset > 0 && !QnHas7z(exeDir) ? 0 : (int)preset;
+}
+// 프리셋에 맞는 확장자. exeDir: 7z.dll 이 있는 차곡 폴더 (끝에 \ 있어도 됨)
+inline std::wstring QnExt(const std::wstring& exeDir) { return QnPreset(exeDir) == 0 ? L".zip" : L".7z"; }

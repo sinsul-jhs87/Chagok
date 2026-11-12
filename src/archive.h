@@ -37,6 +37,8 @@ bool AnyCreate(const std::wstring& target, std::vector<AddItem>& items, uint64_t
                const std::wstring& password = L"");
 bool AnyCanEncrypt(const std::wstring& target);   // .zip / .7z
 bool AnyHasPassword(const AnyArchive& a);
+// 후보 암호를 맞춰 보고, 맞는 것이 있으면 기억 (암호가 없는 압축 파일이면 true)
+bool AnyTryPasswords(AnyArchive& a, const std::vector<std::wstring>& cands);
 
 // 7z.dll 사용 가능 여부 (Chagok.exe 옆에 있어야 함)
 bool SzAvailable();

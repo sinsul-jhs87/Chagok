@@ -479,7 +479,7 @@ static bool SzOpen(AnyArchive& a, const std::vector<std::wstring>& vols, std::ws
         if (z.arc) { z.fmtInfo = f; break; }
         if (cb->cancelled) break;
         bool wrong = false;
-        for (int retry = 0; retry < 3 && cb->asked && !cb->cancelled && !z.arc; retry++) {  // 암호가 틀림 → 다시 묻기
+        for (int retry = 0; retry < 16 && cb->asked && !cb->cancelled && !z.arc; retry++) {  // 암호가 틀림 → 다시 묻기
             wrong = true;
             z.password.clear();
             z.arc = TryOpen(*f, vols, cb);
@@ -959,6 +959,17 @@ static bool NeedPassword(AnyArchive& a, Job& job, std::wstring& pw, std::wstring
     }
     if (!ok) { err = std::wstring(L"암호가 틀려 ") + what; return false; }
     return true;
+}
+
+// 자주 쓰는 암호 맞춰 보기: 맞는 것이 있으면 그 암호를 기억해 둔다 (풀 때 묻지 않음)
+bool AnyTryPasswords(AnyArchive& a, const std::vector<std::wstring>& cands) {
+    if (!AnyHasPassword(a)) return true;
+    if (!a.isZip && !a.sz) return false;
+    std::wstring& known = a.isZip ? a.zip.password : a.sz->password;
+    if (!known.empty() && (a.isZip ? ZipCheckPassword(a.zip, known) : SzTestPassword(a, known))) return true;
+    for (auto& c : cands)
+        if (!c.empty() && (a.isZip ? ZipCheckPassword(a.zip, c) : SzTestPassword(a, c))) { known = c; return true; }
+    return false;
 }
 
 bool AnyModify(AnyArchive& a, const std::map<int, std::wstring>& rename, const std::vector<int>& del, Job& job, std::wstring& err) {

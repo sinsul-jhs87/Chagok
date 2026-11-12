@@ -50,7 +50,21 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
     std::vector<ChagokMenuItem> m;
     if (paths.empty()) return m;
     bool package = paths.size() == 1 && ChagokIsArchive(paths[0]) && fmt::IsPackagePath(paths[0]);  // apk·iso 등: 압축 위주 + 풀기 일부
-    if (paths.size() == 1 && ChagokIsArchive(paths[0]) && !package) {
+    bool allArc = paths.size() > 1;  // 압축 파일만 여러 개 골랐을 때: 하나씩 차례로 풀기·검사
+    for (auto& p : paths) if (!ChagokIsArchive(p)) { allArc = false; break; }
+    if (allArc) {
+        std::wstring n = L" (" + std::to_wstring(paths.size()) + L"개)";
+        m.push_back({L"x-smart", L"각각 알아서 풀기" + n});
+        m.push_back({L"x-here", L"모두 현재 폴더에 풀기"});
+        m.push_back({L"x-folder", L"각각 파일 이름 폴더에 풀기"});
+        m.push_back({L"x-to", L"풀 위치 선택…"});
+        m.push_back({L"x-del", L"각각 알아서 풀고 압축 파일 지우기"});
+        m.push_back({L"-4", L""});
+        m.push_back({L"scan", L"백신으로 검사"});
+        m.push_back({L"test", L"압축 파일 검사"});
+        m.push_back({L"-1", L""});
+        m.push_back({L"compress", L"압축하기…"});  // 압축 파일들을 하나로 묶기 (Windows 11 메뉴 순서와 맞추려 바로 압축은 넣지 않음)
+    } else if (paths.size() == 1 && ChagokIsArchive(paths[0]) && !package) {
         m.push_back({L"x-smart", L"알아서 풀기"});
         m.push_back({L"x-here", L"현재 폴더에 압축 풀기"});
         m.push_back({L"x-folder", L"파일 이름 폴더에 풀기"});
@@ -58,21 +72,42 @@ std::vector<ChagokMenuItem> ChagokBuildMenu(const std::vector<std::wstring>& pat
         m.push_back({L"x-del", L"알아서 풀고 압축 파일 지우기"});
         m.push_back({L"-4", L""});  // 구분선
         m.push_back({L"scan", L"백신으로 검사"});
+        m.push_back({L"test", L"압축 파일 검사"});
         bool has7z = GetFileAttributesW((ModuleDir() + L"7z.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
         std::wstring e = fmt::Ext(paths[0]);
         if (!fmt::UsesZipEngine(paths[0])) m.push_back({L"conv-zip", L"ZIP 으로 바꾸기"});
         if (has7z && e != L"7z" && !(e.size() >= 3 && fmt::Digits(e) && fmt::Ext(paths[0].substr(0, paths[0].size() - e.size() - 1)) == L"7z"))
             m.push_back({L"conv-7z", L"7z 로 바꾸기"});
     } else {
+        int preset = QnPreset(ModuleDir());  // 바로 압축은 설정의 프리셋을 따름
         std::wstring ext = QnExt(ModuleDir()), f = QnFolderStem(paths), n = QnStem(paths[0]);
         m.push_back({L"c-folder", AsName(f + ext)});
         if (paths.size() > 1 && n != f) m.push_back({L"c-name", AsName(n + ext)});
         m.push_back({L"c-date", AsName(f + L"_" + QnToday() + ext)});
         if (paths.size() > 1) m.push_back({L"c-each", L"각각 압축 (" + std::to_wstring(paths.size()) + L"개 → 이름" + ext + L")"});
         m.push_back({L"c-pw", L"암호 걸어 압축…"});
+        {   // 다른 방식으로 압축 ▸ : 프리셋과 같은 방식은 빼고 (이번 한 번만 다른 방식)
+            ChagokMenuItem o{L"c-other", L"다른 방식으로 압축", {}};
+            bool has7z = QnHas7z(ModuleDir());
+            if (preset != 0) o.sub.push_back({L"c-zip", f + L".zip  (빠름)", {}});
+            o.sub.push_back({L"c-zipmax", f + L".zip  (최대 압축)", {}});
+            if (has7z && preset != 1) o.sub.push_back({L"c-7z", f + L".7z  (보통 · 더 작게)", {}});
+            if (has7z && preset != 2) o.sub.push_back({L"c-7zmax", f + L".7z  (최대 · 가장 작게, 느림)", {}});
+            m.push_back(o);
+        }
         m.push_back({L"-1", L""});  // 구분선
         m.push_back({L"compress", L"압축하기…"});
-        m.push_back({L"split", L"분할 압축…"});
+        {   // 분할 압축 ▸ : 자주 쓰는 크기는 바로, 그 밖은 설정 창
+            ChagokMenuItem sp{L"c-split", L"분할 압축", {}};
+            sp.sub.push_back({L"s-10", L"10MB 씩", {}});
+            sp.sub.push_back({L"s-20", L"20MB 씩 (메일 첨부)", {}});
+            sp.sub.push_back({L"s-100", L"100MB 씩", {}});
+            sp.sub.push_back({L"s-700", L"700MB 씩", {}});
+            sp.sub.push_back({L"s-4g", L"4GB 씩 (FAT32 USB)", {}});
+            sp.sub.push_back({L"-s", L"", {}});
+            sp.sub.push_back({L"split", L"크기 직접 지정…", {}});
+            m.push_back(sp);
+        }
         if (package) {
             m.push_back({L"-3", L""});  // 구분선
             // Windows 11 메뉴는 항목 순서가 고정이라, 압축 항목 아래에 놓을 풀기 항목은 별도 이름(…2)을 쓴다 (실행할 때는 같은 명령)
@@ -171,7 +206,7 @@ class ShellExt : public IShellExtInit, public IContextMenu {
     LONG ref = 1;
     std::vector<std::wstring> paths;
     std::vector<ChagokMenuItem> items;
-    std::vector<int> cmdOfs;  // 메뉴 오프셋 → items 인덱스
+    std::vector<const ChagokMenuItem*> cmdOfs;  // 메뉴 오프셋 → 항목 (하위 메뉴 항목 포함)
     HBITMAP bmp = nullptr;
 public:
     ShellExt() { InterlockedIncrement(&g_refs); }
@@ -221,8 +256,18 @@ public:
         for (size_t i = 0; i < items.size(); i++) {
             if (items[i].verb.empty() || items[i].verb[0] == L'-') { AppendMenuW(sub, MF_SEPARATOR, 0, nullptr); continue; }
             if (id > last) break;
+            if (!items[i].sub.empty()) {
+                HMENU pop = CreatePopupMenu();
+                for (auto& c : items[i].sub) {
+                    if (c.verb.empty() || c.verb[0] == L'-') { AppendMenuW(pop, MF_SEPARATOR, 0, nullptr); continue; }
+                    if (id > last) break;
+                    AppendMenuW(pop, MF_STRING, id++, c.label.c_str()); cmdOfs.push_back(&c);
+                }
+                AppendMenuW(sub, MF_POPUP, (UINT_PTR)pop, items[i].label.c_str());
+                continue;
+            }
             AppendMenuW(sub, MF_STRING, id++, items[i].label.c_str());
-            cmdOfs.push_back((int)i);
+            cmdOfs.push_back(&items[i]);
         }
         MENUITEMINFOW mi{sizeof(mi)};
         mi.fMask = MIIM_SUBMENU | MIIM_STRING | MIIM_ID;
@@ -238,7 +283,7 @@ public:
     }
     int FindVerb(LPCSTR verbA, LPCWSTR verbW) {
         for (size_t k = 0; k < cmdOfs.size(); k++) {
-            const std::wstring& v = items[(size_t)cmdOfs[k]].verb;
+            const std::wstring& v = cmdOfs[k]->verb;
             if (verbW && !lstrcmpiW(verbW, (L"chagok." + v).c_str())) return (int)k;
             if (verbA) {
                 std::string a = "chagok.";
@@ -260,7 +305,7 @@ public:
         GetModuleFileNameW(g_inst, dll, MAX_PATH * 2);
         std::wstring exe = dll;
         exe = exe.substr(0, exe.find_last_of(L'\\') + 1) + L"Chagok.exe";
-        if (!ChagokLaunch(exe, items[(size_t)cmdOfs[(size_t)k]].verb, paths)) {
+        if (!ChagokLaunch(exe, cmdOfs[(size_t)k]->verb, paths)) {
             MessageBoxW(ci->hwnd, (L"차곡을 실행할 수 없습니다.\n" + exe).c_str(), L"차곡", MB_ICONERROR);
             return E_FAIL;
         }
@@ -268,7 +313,7 @@ public:
     }
     STDMETHODIMP GetCommandString(UINT_PTR idCmd, UINT type, UINT*, LPSTR name, UINT cch) override {
         if (idCmd >= cmdOfs.size()) return E_INVALIDARG;
-        const ChagokMenuItem& it = items[(size_t)cmdOfs[idCmd]];
+        const ChagokMenuItem& it = *cmdOfs[idCmd];
         std::wstring verb = L"chagok." + it.verb;
         switch (type) {
         case GCS_VERBW: lstrcpynW((LPWSTR)name, verb.c_str(), (int)cch); return S_OK;
@@ -296,8 +341,8 @@ static std::vector<std::wstring> ItemPaths(IShellItemArray* arr) {
     return v;
 }
 static HRESULT DupStr(const std::wstring& s, LPWSTR* out) { return SHStrDupW(s.c_str(), out); }
-static const wchar_t* SUB_VERBS[] = {L"x-smart", L"x-here", L"x-folder", L"x-to", L"x-del", L"-4", L"scan", L"conv-zip", L"conv-7z",
-                                     L"c-folder", L"c-name", L"c-date", L"c-each", L"c-pw", L"-1", L"compress", L"split", L"-3", L"x-smart2", L"x-to2", L"scan2", L"-2", L"open"};
+static const wchar_t* SUB_VERBS[] = {L"x-smart", L"x-here", L"x-folder", L"x-to", L"x-del", L"-4", L"scan", L"test", L"conv-zip", L"conv-7z",
+                                     L"c-folder", L"c-name", L"c-date", L"c-each", L"c-pw", L"c-other", L"-1", L"compress", L"c-split", L"-3", L"x-smart2", L"x-to2", L"scan2", L"-2", L"open"};
 
 class CmdBase : public IExplorerCommand {
 protected:
@@ -322,7 +367,10 @@ public:
 class SubCmd : public CmdBase {
     std::wstring verb;
     const ChagokMenuItem* Find(const std::vector<ChagokMenuItem>& m) const {
-        for (auto& it : m) if (it.verb == verb) return &it;
+        for (auto& it : m) {
+            if (it.verb == verb) return &it;
+            for (auto& c : it.sub) if (c.verb == verb) return &c;
+        }
         return nullptr;
     }
 public:
@@ -333,13 +381,25 @@ public:
         if (v == L"x-folder") return L"파일 이름 폴더에 풀기";
         if (v == L"x-to") return L"풀 위치 선택…";
         if (v == L"compress") return L"압축하기…";
-        if (v == L"split") return L"분할 압축…";
+        if (v == L"split") return L"크기 직접 지정…";
         if (v == L"x-del") return L"알아서 풀고 압축 파일 지우기";
         if (v == L"x-smart2") return L"알아서 풀기";
         if (v == L"x-to2") return L"풀 위치 선택…";
         if (v == L"scan" || v == L"scan2") return L"백신으로 검사";
         if (v == L"conv-zip") return L"ZIP 으로 바꾸기";
         if (v == L"conv-7z") return L"7z 로 바꾸기";
+        if (v == L"c-other") return L"다른 방식으로 압축";
+        if (v == L"c-split") return L"분할 압축";
+        if (v == L"test") return L"압축 파일 검사";
+        if (v == L"s-10") return L"10MB 씩";
+        if (v == L"s-20") return L"20MB 씩";
+        if (v == L"s-100") return L"100MB 씩";
+        if (v == L"s-700") return L"700MB 씩";
+        if (v == L"s-4g") return L"4GB 씩";
+        if (v == L"c-zip") return L"ZIP 으로 압축 (빠름)";
+        if (v == L"c-7z") return L"7z 로 압축 (보통)";
+        if (v == L"c-7zmax") return L"7z 로 압축 (최대)";
+        if (v == L"c-zipmax") return L"ZIP 으로 압축 (최대)";
         if (v == L"c-folder") return L"폴더 이름으로 압축";
         if (v == L"c-name") return L"파일 이름으로 압축";
         if (v == L"c-date") return L"날짜 붙여 압축";
@@ -361,7 +421,8 @@ public:
         if (!paths.empty() && !Find(ChagokBuildMenu(paths))) *st = ECS_HIDDEN;  // 선택에 맞지 않는 명령만 숨김
         return S_OK;
     }
-    STDMETHODIMP GetFlags(EXPCMDFLAGS* f) override { *f = verb[0] == L'-' ? ECF_ISSEPARATOR : ECF_DEFAULT; return S_OK; }
+    STDMETHODIMP GetFlags(EXPCMDFLAGS* f) override { *f = verb[0] == L'-' ? ECF_ISSEPARATOR : verb == L"c-other" || verb == L"c-split" ? ECF_HASSUBCOMMANDS : ECF_DEFAULT; return S_OK; }
+    STDMETHODIMP EnumSubCommands(IEnumExplorerCommand** e) override;
     STDMETHODIMP Invoke(IShellItemArray* arr, IBindCtx*) override {
         auto paths = ItemPaths(arr);
         if (paths.empty()) return E_INVALIDARG;
@@ -374,11 +435,16 @@ public:
     }
 };
 
+static const wchar_t* OTHER_VERBS[] = {L"c-zip", L"c-zipmax", L"c-7z", L"c-7zmax"};  // '다른 방식으로 압축 ▸' 안
+static const wchar_t* SPLIT_VERBS[] = {L"s-10", L"s-20", L"s-100", L"s-700", L"s-4g", L"-s", L"split"};  // '분할 압축 ▸' 안
 class SubEnum : public IEnumExplorerCommand {
     LONG ref = 1;
     ULONG pos = 0;
+    const wchar_t* const* list = SUB_VERBS;
+    ULONG total = sizeof(SUB_VERBS) / sizeof(SUB_VERBS[0]);
 public:
     SubEnum() { InterlockedIncrement(&g_refs); }
+    SubEnum(const wchar_t* const* l, ULONG n) : list(l), total(n) { InterlockedIncrement(&g_refs); }
     virtual ~SubEnum() { InterlockedDecrement(&g_refs); }
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IEnumExplorerCommand)) { *ppv = this; AddRef(); return S_OK; }
@@ -389,8 +455,7 @@ public:
     STDMETHODIMP_(ULONG) Release() override { LONG r = InterlockedDecrement(&ref); if (!r) delete this; return (ULONG)r; }
     STDMETHODIMP Next(ULONG n, IExplorerCommand** out, ULONG* fetched) override {
         ULONG k = 0;
-        const ULONG total = sizeof(SUB_VERBS) / sizeof(SUB_VERBS[0]);
-        while (k < n && pos < total) out[k++] = new SubCmd(SUB_VERBS[pos++]);
+        while (k < n && pos < total) out[k++] = new SubCmd(list[pos++]);
         if (fetched) *fetched = k;
         return k == n ? S_OK : S_FALSE;
     }
@@ -398,6 +463,13 @@ public:
     STDMETHODIMP Reset() override { pos = 0; return S_OK; }
     STDMETHODIMP Clone(IEnumExplorerCommand** e) override { *e = nullptr; return E_NOTIMPL; }
 };
+
+STDMETHODIMP SubCmd::EnumSubCommands(IEnumExplorerCommand** e) {
+    if (verb == L"c-other") *e = new SubEnum(OTHER_VERBS, sizeof(OTHER_VERBS) / sizeof(OTHER_VERBS[0]));
+    else if (verb == L"c-split") *e = new SubEnum(SPLIT_VERBS, sizeof(SPLIT_VERBS) / sizeof(SPLIT_VERBS[0]));
+    else { *e = nullptr; return E_NOTIMPL; }
+    return S_OK;
+}
 
 class RootCmd : public CmdBase {
 public:

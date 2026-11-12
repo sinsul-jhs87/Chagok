@@ -3,8 +3,8 @@
 IDI_APP ICON "sfx.ico"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,20,0,0
- PRODUCTVERSION 1,20,0,0
+ FILEVERSION 1,21,0,0
+ PRODUCTVERSION 1,21,0,0
  FILEOS 0x40004
  FILETYPE 0x1
 BEGIN
@@ -14,9 +14,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "주식회사신설"
       VALUE "FileDescription", "차곡 자동 압축 풀기"
-      VALUE "FileVersion", "1.20.0"
+      VALUE "FileVersion", "1.21.0"
       VALUE "ProductName", "차곡"
-      VALUE "ProductVersion", "1.20.0"
+      VALUE "ProductVersion", "1.21.0"
     END
   END
   BLOCK "VarFileInfo"
